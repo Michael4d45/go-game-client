@@ -1,0 +1,4 @@
+github.com/bencurio/pusher-ws-go v0.0.0-20250409081115-00d54296525f h1:uMyS3G+ZXWyYYXphv42bwoe2wjTW2GedwQK4GNSD2Og=
+github.com/bencurio/pusher-ws-go v0.0.0-20250409081115-00d54296525f/go.mod h1:ZX6TsijAj12pu5mgq6sTxbmB7uEAmgZvuEmOdSMoXzw=
+golang.org/x/net v0.39.0 h1:ZCu7HMWDxpXpaiKdhzIfaltL9Lp31x/3fCP11bc6/fY=
+golang.org/x/net v0.39.0/go.mod h1:X7NRbYVEA+ewNkCNyJ513WmMdQ3BineSwVtN2zD/d+E=

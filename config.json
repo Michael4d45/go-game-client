@@ -1,0 +1,16 @@
+{
+  "server_url": "http://bizhawk-shuffler-server.test",
+  "reverb": {
+    "app_key": "",
+    "auth_url": "",
+    "bearer_token": "",
+    "host_port": 8080
+  },
+  "player_id": "",
+  "session_name": "",
+  "bizhawk_download_url": "https://github.com/TASEmulators/BizHawk/releases/download/2.10/BizHawk-2.10-win-x64.zip",
+  "bizhawk_path": "BizHawk-2.10-win-x64\\EmuHawk.exe",
+  "lua_script": "scripts\\swap_latest.lua",
+  "rom_dir": "roms",
+  "save_dir": "saves"
+}
