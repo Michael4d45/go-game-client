@@ -40,13 +40,14 @@ func main() {
 	// Start heartbeat loop
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
+		ping := 0;
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				sendHeartbeat(cfg, 42, "unknown") // TODO: replace with real ping/game
+				ping = sendHeartbeat(cfg, ping, "unknown") // TODO: replace with real ping/game
 			}
 		}
 	}()

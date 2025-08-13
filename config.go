@@ -3,59 +3,69 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"fmt"
 )
 
-type ReverbConfig struct {
-	AppKey      string `json:"app_key"`
-	AuthURL     string `json:"auth_url"`
-	BearerToken string `json:"bearer_token"`
-	HostPort    int    `json:"host_port"`
-}
-
 type Config struct {
-	ServerURL          string       `json:"server_url"`
-	Reverb             ReverbConfig `json:"reverb"`
-	PlayerID           string       `json:"player_id"`
-	SessionName        string       `json:"session_name"`
-	BizHawkDownloadURL string       `json:"bizhawk_download_url"`
-	BizHawkPath        string       `json:"bizhawk_path"`
-	LuaScript          string       `json:"lua_script"`
-	RomDir             string       `json:"rom_dir"`
-	SaveDir            string       `json:"save_dir"`
+	AppKey      string `json:"app_key"`
+	BearerToken string `json:"bearer_token"`
+
+	ServerScheme string `json:"server_scheme"`
+	ServerHost   string `json:"server_host"`
+	ServerPort   int    `json:"server_port"`
+
+	PusherPort int `json:"pusher_port"`
+
+	PlayerID    string `json:"player_id"`
+	SessionName string `json:"session_name"`
+
+	BizHawkDownloadURL string `json:"bizhawk_download_url"`
+	BizHawkPath        string `json:"bizhawk_path"`
+	LuaScript          string `json:"lua_script"`
+	RomDir             string `json:"rom_dir"`
+	SaveDir            string `json:"save_dir"`
+
+	// Computed fields — omit from JSON
+	ServerURL string `json:"-"`
 }
 
-// DefaultConfig returns the default configuration
+func (c *Config) ComputeURLs() {
+	c.ServerURL = fmt.Sprintf("%s://%s:%d", c.ServerScheme, c.ServerHost, c.ServerPort)
+}
+
 func DefaultConfig() *Config {
-	return &Config{
-		ServerURL: "http://bizhawk-shuffler-server.test",
-		Reverb: ReverbConfig{
-			AppKey:      "",
-			AuthURL:     "",
-			BearerToken: "",
-			HostPort:    8080,
-		},
-		PlayerID:           "",
-		SessionName:        "",
+	cfg := &Config{
+		AppKey:      "",
+		BearerToken: "",
+
+		ServerScheme: "http",
+		ServerHost:   "bizhawk-shuffler-server.test",
+		ServerPort:   8080,
+
+		PusherPort: 8000,
+
+		PlayerID:    "",
+		SessionName: "",
+
 		BizHawkDownloadURL: "https://github.com/TASEmulators/BizHawk/releases/download/2.10/BizHawk-2.10-win-x64.zip",
 		BizHawkPath:        "BizHawk-2.10-win-x64\\EmuHawk.exe",
 		LuaScript:          "scripts\\swap_latest.lua",
 		RomDir:             "roms",
 		SaveDir:            "saves",
 	}
+
+	cfg.ComputeURLs()
+	return cfg
 }
 
 func LoadOrCreateConfig(path string) (*Config, error) {
-	// Check if file exists
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		// Write default config
-		defaultCfg := DefaultConfig()
-		if err := SaveConfig(defaultCfg, path); err != nil {
+		cfg := DefaultConfig()
+		if err := SaveConfig(cfg, path); err != nil {
 			return nil, err
 		}
-		return defaultCfg, nil
+		return cfg, nil
 	}
-
-	// Otherwise load existing config
 	return LoadConfig(path)
 }
 
@@ -67,8 +77,12 @@ func LoadConfig(path string) (*Config, error) {
 	defer f.Close()
 
 	var cfg Config
-	err = json.NewDecoder(f).Decode(&cfg)
-	return &cfg, err
+	if err := json.NewDecoder(f).Decode(&cfg); err != nil {
+		return nil, err
+	}
+
+	cfg.ComputeURLs()
+	return &cfg, nil
 }
 
 func SaveConfig(cfg *Config, path string) error {

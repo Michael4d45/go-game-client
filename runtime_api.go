@@ -5,11 +5,12 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"time"
 )
 
 // sendHeartbeat sends ping + current game to Laravel
-func sendHeartbeat(cfg *Config, ping int, currentGame string) {
-	payload := map[string]interface{}{
+func sendHeartbeat(cfg *Config, ping int, currentGame string) int {
+	payload := map[string]any{
 		"ping":         ping,
 		"current_game": currentGame,
 	}
@@ -18,21 +19,28 @@ func sendHeartbeat(cfg *Config, ping int, currentGame string) {
 	req, err := http.NewRequest("POST", cfg.ServerURL+"/api/heartbeat", bytes.NewReader(body))
 	if err != nil {
 		log.Printf("Heartbeat request error: %v", err)
-		return
+		return 0
 	}
-	req.Header.Set("Authorization", "Bearer "+cfg.Reverb.BearerToken)
+	req.Header.Set("Authorization", "Bearer "+cfg.BearerToken)
 	req.Header.Set("Content-Type", "application/json")
+
+	start := time.Now()
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		log.Printf("Heartbeat send error: %v", err)
-		return
+		return 0
 	}
 	defer resp.Body.Close()
+
+	rtt := time.Since(start)
+	newPing := int(rtt.Milliseconds())
 
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("Heartbeat failed: %s", resp.Status)
 	}
+
+	return newPing
 }
 
 // sendReady notifies Laravel that the player is ready
@@ -42,7 +50,7 @@ func sendReady(cfg *Config) {
 		log.Printf("Ready request error: %v", err)
 		return
 	}
-	req.Header.Set("Authorization", "Bearer "+cfg.Reverb.BearerToken)
+	req.Header.Set("Authorization", "Bearer "+cfg.BearerToken)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -58,7 +66,7 @@ func sendReady(cfg *Config) {
 
 // notifySwapComplete tells Laravel the swap is done
 func notifySwapComplete(cfg *Config, roundNumber int) {
-	payload := map[string]interface{}{
+	payload := map[string]any{
 		"round_number": roundNumber,
 	}
 	body, _ := json.Marshal(payload)
@@ -68,7 +76,7 @@ func notifySwapComplete(cfg *Config, roundNumber int) {
 		log.Printf("Swap-complete request error: %v", err)
 		return
 	}
-	req.Header.Set("Authorization", "Bearer "+cfg.Reverb.BearerToken)
+	req.Header.Set("Authorization", "Bearer "+cfg.BearerToken)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
@@ -85,7 +93,7 @@ func notifySwapComplete(cfg *Config, roundNumber int) {
 
 // sendGameStarted tells Laravel which game started
 func sendGameStarted(cfg *Config, gameName string) {
-	payload := map[string]interface{}{
+	payload := map[string]any{
 		"current_game": gameName,
 	}
 	body, _ := json.Marshal(payload)
@@ -95,7 +103,7 @@ func sendGameStarted(cfg *Config, gameName string) {
 		log.Printf("Game-started request error: %v", err)
 		return
 	}
-	req.Header.Set("Authorization", "Bearer "+cfg.Reverb.BearerToken)
+	req.Header.Set("Authorization", "Bearer "+cfg.BearerToken)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
@@ -117,7 +125,7 @@ func sendGameStopped(cfg *Config) {
 		log.Printf("Game-stopped request error: %v", err)
 		return
 	}
-	req.Header.Set("Authorization", "Bearer "+cfg.Reverb.BearerToken)
+	req.Header.Set("Authorization", "Bearer "+cfg.BearerToken)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

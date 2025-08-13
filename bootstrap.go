@@ -37,33 +37,31 @@ func Bootstrap(cfg *Config) error {
 	reader := bufio.NewReader(os.Stdin)
 
 	for {
-		if cfg.PlayerID == "" || cfg.Reverb.BearerToken == "" || cfg.Reverb.AppKey == "" {
+		if cfg.PlayerID == "" || cfg.BearerToken == "" || cfg.AppKey == "" {
 			fmt.Print("Enter your desired player ID: ")
 			playerID, _ := reader.ReadString('\n')
 			cfg.PlayerID = strings.TrimSpace(playerID)
 
-			token, appKey, authURL, err := registerPlayer(cfg.ServerURL, cfg.PlayerID)
+			token, appKey, err := registerPlayer(cfg.ServerURL, cfg.PlayerID)
 			if err != nil {
 				log.Println(fmt.Errorf("%w", err))
 				fmt.Println("failed to register player")
 				continue
 			}
-			cfg.Reverb.BearerToken = token
-			cfg.Reverb.AppKey = appKey
-			cfg.Reverb.AuthURL = authURL
+			cfg.BearerToken = token
+			cfg.AppKey = appKey
 			break
 		}
 
-		if (!checkTokenExists(cfg.ServerURL, cfg.Reverb.BearerToken)) {
-			cfg.Reverb.BearerToken = ""
-			cfg.Reverb.AppKey = ""
-			cfg.Reverb.AuthURL = ""
+		if !checkTokenExists(cfg.ServerURL, cfg.BearerToken) {
+			cfg.BearerToken = ""
+			cfg.AppKey = ""
 		}
 	}
 
 	for {
 		if cfg.SessionName != "" {
-			exists, err := checkSessionExists(cfg.ServerURL, cfg.SessionName, cfg.Reverb.BearerToken)
+			exists, err := checkSessionExists(cfg.ServerURL, cfg.SessionName, cfg.BearerToken)
 			if err != nil {
 				return err
 			}
@@ -77,7 +75,7 @@ func Bootstrap(cfg *Config) error {
 		sessionName, _ := reader.ReadString('\n')
 		sessionName = strings.TrimSpace(sessionName)
 
-		exists, err := checkSessionExists(cfg.ServerURL, sessionName, cfg.Reverb.BearerToken)
+		exists, err := checkSessionExists(cfg.ServerURL, sessionName, cfg.BearerToken)
 		if err != nil {
 			return err
 		}
@@ -87,7 +85,7 @@ func Bootstrap(cfg *Config) error {
 		}
 	}
 
-	joinSession(cfg.ServerURL, cfg.SessionName, cfg.Reverb.BearerToken)
+	joinSession(cfg.ServerURL, cfg.SessionName, cfg.BearerToken)
 
 	luaURL := cfg.ServerURL + "/api/scripts/latest"
 	luaDest := filepath.Join("scripts", "swap_latest.lua")
@@ -138,16 +136,16 @@ func DownloadAndExtract(url, zipPath, dest string) error {
 	return nil
 }
 
-func registerPlayer(serverURL, playerID string) (string, string, string, error) {
+func registerPlayer(serverURL, playerID string) (string, string, error) {
 	reqBody := strings.NewReader(fmt.Sprintf(`{"player_id":"%s"}`, playerID))
 	resp, err := http.Post(serverURL+"/api/register-player", "application/json", reqBody)
 	if err != nil {
-		return "", "", "", err
+		return "", "", err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", "", "", fmt.Errorf("server returned %s", resp.Status)
+		return "", "", fmt.Errorf("server returned %s", resp.Status)
 	}
 
 	var data struct {
@@ -157,10 +155,10 @@ func registerPlayer(serverURL, playerID string) (string, string, string, error) 
 		ReverbAuthURL string `json:"reverb_auth_url"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return "", "", "", err
+		return "", "", err
 	}
 
-	return data.BearerToken, data.ReverbAppKey, data.ReverbAuthURL, nil
+	return data.BearerToken, data.ReverbAppKey, nil
 }
 
 func checkSessionExists(serverURL, sessionName, token string) (bool, error) {
@@ -194,7 +192,7 @@ func joinSession(serverURL, sessionName, token string) {
 	http.DefaultClient.Do(req)
 }
 
-func checkTokenExists(serverURL, token string) (bool) {
+func checkTokenExists(serverURL, token string) bool {
 	req, err := http.NewRequest("GET", serverURL+"/api/check-token", nil)
 	if err != nil {
 		return false
