@@ -2,23 +2,44 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"time"
 )
 
+var verbose bool
+
 func initLogging() {
-	logFile, err := os.OpenFile("client.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	logFile, err := os.OpenFile(
+		"client.log",
+		os.O_CREATE|os.O_WRONLY|os.O_APPEND,
+		0666,
+	)
 	if err != nil {
 		fmt.Println("Failed to open log file:", err)
 		os.Exit(1)
 	}
-	log.SetOutput(logFile)
+
+	if verbose {
+		// Log to both file and console
+		mw := io.MultiWriter(os.Stdout, logFile)
+		log.SetOutput(mw)
+	} else {
+		// Log only to file
+		log.SetOutput(logFile)
+	}
+
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 }
 
 func main() {
+	// Define -v flag
+	flag.BoolVar(&verbose, "v", false, "Enable verbose logging to console")
+	flag.Parse()
+
 	initLogging()
 	log.Println("=== Game Client Starting ===")
 
@@ -40,7 +61,7 @@ func main() {
 	// Start heartbeat loop
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
-		ping := 0;
+		ping := 0
 		defer ticker.Stop()
 		for {
 			select {

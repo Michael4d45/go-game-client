@@ -53,7 +53,10 @@ func Bootstrap(cfg *Config) error {
 			break
 		}
 
-		if !checkTokenExists(cfg.ServerURL, cfg.BearerToken) {
+		if checkTokenExists(cfg.ServerURL, cfg.BearerToken) {
+			break
+		} else {
+			log.Println("check token failed")
 			cfg.BearerToken = ""
 			cfg.AppKey = ""
 		}
@@ -193,23 +196,45 @@ func joinSession(serverURL, sessionName, token string) {
 }
 
 func checkTokenExists(serverURL, token string) bool {
-	req, err := http.NewRequest("GET", serverURL+"/api/check-token", nil)
+	req, err := http.NewRequest("POST", serverURL+"/api/check-token", nil)
 	if err != nil {
+		log.Printf("checkTokenExists: failed to create request: %v", err)
 		return false
 	}
+
+	// Set Authorization header
 	req.Header.Set("Authorization", "Bearer "+token)
+
+	// Log request info (mask token for safety)
+	maskedToken := "<empty>"
+	if len(token) > 8 {
+		maskedToken = token[:6] + "..."
+	} else if len(token) > 0 {
+		maskedToken = "..."
+	}
+	log.Printf(
+		"checkTokenExists: sending request: method=%s url=%s token=%s",
+		req.Method,
+		req.URL.String(),
+		maskedToken,
+	)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+		log.Printf("checkTokenExists: request failed: %v", err)
 		return false
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
+		log.Printf("checkTokenExists: token not found (404)")
 		return false
 	}
 	if resp.StatusCode != http.StatusOK {
+		log.Printf("checkTokenExists: unexpected status code %d", resp.StatusCode)
 		return false
 	}
+
+	log.Printf("checkTokenExists: token is valid")
 	return true
 }
