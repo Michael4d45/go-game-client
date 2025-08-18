@@ -11,16 +11,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 func Bootstrap(cfg *Config) error {
 	os.MkdirAll(cfg.RomDir, 0755)
 	os.MkdirAll(cfg.SaveDir, 0755)
 	os.MkdirAll("scripts", 0755)
-
-	if cfg.BizHawkDownloadURL == "" {
-		cfg.BizHawkDownloadURL = "https://github.com/TASEmulators/BizHawk/releases/download/2.10/BizHawk-2.10-win-x64.zip"
-	}
 
 	zipFileName := filepath.Base(cfg.BizHawkDownloadURL)
 	installDir := strings.TrimSuffix(zipFileName, filepath.Ext(zipFileName))
@@ -37,12 +34,12 @@ func Bootstrap(cfg *Config) error {
 	reader := bufio.NewReader(os.Stdin)
 
 	for {
-		if cfg.PlayerID == "" || cfg.BearerToken == "" || cfg.AppKey == "" {
+		if cfg.PlayerName == "" || cfg.BearerToken == "" || cfg.AppKey == "" {
 			fmt.Print("Enter your desired player ID: ")
-			playerID, _ := reader.ReadString('\n')
-			cfg.PlayerID = strings.TrimSpace(playerID)
+			playerName, _ := reader.ReadString('\n')
+			cfg.PlayerName = strings.TrimSpace(playerName)
 
-			token, appKey, err := registerPlayer(cfg.ServerURL, cfg.PlayerID)
+			token, appKey, err := registerPlayer(cfg.ServerURL, cfg.PlayerName)
 			if err != nil {
 				log.Println(fmt.Errorf("%w", err))
 				fmt.Println("failed to register player")
@@ -77,18 +74,49 @@ func Bootstrap(cfg *Config) error {
 		fmt.Print("Enter game session name: ")
 		sessionName, _ := reader.ReadString('\n')
 		sessionName = strings.TrimSpace(sessionName)
-
-		exists, err := checkSessionExists(cfg.ServerURL, sessionName, cfg.BearerToken)
-		if err != nil {
-			return err
-		}
-		if exists {
-			cfg.SessionName = sessionName
-			break
-		}
+		cfg.SessionName = sessionName
 	}
 
-	joinSession(cfg.ServerURL, cfg.SessionName, cfg.BearerToken)
+	games, err := joinSession(cfg.ServerURL, cfg.SessionName, cfg.BearerToken)
+	if err != nil {
+		return err
+	}
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, len(games)) // collect errors
+
+	for _, g := range games {
+		localPath := filepath.Join(cfg.RomDir, g)
+
+		// Check if already exists
+		if _, err := os.Stat(localPath); err == nil {
+			fmt.Println("Game already exists:", g)
+			continue
+		}
+
+		// Missing → download in parallel
+		wg.Add(1)
+		go func(gameFile string, dest string) {
+			defer wg.Done()
+			fmt.Println("Downloading:", gameFile)
+			romURL := cfg.ServerURL + "/api/roms/" + gameFile
+			if err := DownloadFile(romURL, dest); err != nil {
+				log.Printf("Failed to download %s: %v", gameFile, err)
+				errCh <- err
+			}
+		}(g, localPath)
+	}
+
+	// Wait for all downloads
+	wg.Wait()
+	close(errCh)
+
+	// If any errors occurred, return the first one
+	for e := range errCh {
+		if e != nil {
+			return e
+		}
+	}
 
 	luaURL := cfg.ServerURL + "/api/scripts/latest"
 	luaDest := filepath.Join("scripts", "swap_latest.lua")
@@ -139,23 +167,39 @@ func DownloadAndExtract(url, zipPath, dest string) error {
 	return nil
 }
 
-func registerPlayer(serverURL, playerID string) (string, string, error) {
-	reqBody := strings.NewReader(fmt.Sprintf(`{"player_id":"%s"}`, playerID))
-	resp, err := http.Post(serverURL+"/api/register-player", "application/json", reqBody)
+func registerPlayer(serverURL, playerName string) (string, string, error) {
+	// Prepare request body
+	reqBody := strings.NewReader(fmt.Sprintf(`{"name":"%s"}`, playerName))
+
+	log.Println("Registering player: " + playerName)
+
+	// Create a new request
+	req, err := http.NewRequest("POST", serverURL+"/api/register-player", reqBody)
+	if err != nil {
+		return "", "", err
+	}
+
+	// Set headers
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	// Send request
+	client := &http.Client{}
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", "", err
 	}
 	defer resp.Body.Close()
 
+	// Check status
 	if resp.StatusCode != http.StatusOK {
 		return "", "", fmt.Errorf("server returned %s", resp.Status)
 	}
 
+	// Decode JSON response
 	var data struct {
-		PlayerID      string `json:"player_id"`
-		BearerToken   string `json:"bearer_token"`
-		ReverbAppKey  string `json:"reverb_app_key"`
-		ReverbAuthURL string `json:"reverb_auth_url"`
+		BearerToken  string `json:"bearer_token"`
+		ReverbAppKey string `json:"reverb_app_key"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
 		return "", "", err
@@ -170,6 +214,7 @@ func checkSessionExists(serverURL, sessionName, token string) (bool, error) {
 		return false, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -186,13 +231,46 @@ func checkSessionExists(serverURL, sessionName, token string) (bool, error) {
 	return true, nil
 }
 
-func joinSession(serverURL, sessionName, token string) {
+type Game struct {
+	File string `json:"file"`
+}
+
+type Session struct {
+	ID    int    `json:"id"`
+	Name  string `json:"name"`
+	Games []Game `json:"games"`
+}
+
+func joinSession(serverURL, sessionName, token string) ([]string, error) {
 	req, err := http.NewRequest("POST", serverURL+"/api/join-session/"+sessionName, nil)
 	if err != nil {
-		return
+		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	http.DefaultClient.Do(req)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("server returned %s", resp.Status)
+	}
+
+	var session Session
+	if err := json.NewDecoder(resp.Body).Decode(&session); err != nil {
+		return nil, err
+	}
+
+	// Extract just the file names
+	var gameFiles []string
+	for _, g := range session.Games {
+		gameFiles = append(gameFiles, g.File)
+	}
+
+	return gameFiles, nil
 }
 
 func checkTokenExists(serverURL, token string) bool {
@@ -204,6 +282,7 @@ func checkTokenExists(serverURL, token string) bool {
 
 	// Set Authorization header
 	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/json")
 
 	// Log request info (mask token for safety)
 	maskedToken := "<empty>"

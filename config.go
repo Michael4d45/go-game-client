@@ -2,8 +2,8 @@ package main
 
 import (
 	"encoding/json"
-	"os"
 	"fmt"
+	"os"
 )
 
 type Config struct {
@@ -16,7 +16,7 @@ type Config struct {
 
 	PusherPort int `json:"pusher_port"`
 
-	PlayerID    string `json:"player_id"`
+	PlayerName  string `json:"player_name"`
 	SessionName string `json:"session_name"`
 
 	BizHawkDownloadURL string `json:"bizhawk_download_url"`
@@ -44,7 +44,7 @@ func DefaultConfig() *Config {
 
 		PusherPort: 8000,
 
-		PlayerID:    "",
+		PlayerName:  "",
 		SessionName: "",
 
 		BizHawkDownloadURL: "https://github.com/TASEmulators/BizHawk/releases/download/2.10/BizHawk-2.10-win-x64.zip",

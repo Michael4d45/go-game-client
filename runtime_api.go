@@ -23,6 +23,7 @@ func sendHeartbeat(cfg *Config, ping int, currentGame string) int {
 	}
 	req.Header.Set("Authorization", "Bearer "+cfg.BearerToken)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
 
 	start := time.Now()
 
@@ -51,6 +52,7 @@ func sendReady(cfg *Config) {
 		return
 	}
 	req.Header.Set("Authorization", "Bearer "+cfg.BearerToken)
+	req.Header.Set("Accept", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -78,6 +80,7 @@ func notifySwapComplete(cfg *Config, roundNumber int) {
 	}
 	req.Header.Set("Authorization", "Bearer "+cfg.BearerToken)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -105,6 +108,7 @@ func sendGameStarted(cfg *Config, gameName string) {
 	}
 	req.Header.Set("Authorization", "Bearer "+cfg.BearerToken)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -126,6 +130,7 @@ func sendGameStopped(cfg *Config) {
 		return
 	}
 	req.Header.Set("Authorization", "Bearer "+cfg.BearerToken)
+	req.Header.Set("Accept", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

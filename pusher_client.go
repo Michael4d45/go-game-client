@@ -55,7 +55,7 @@ func (pc *PusherClient) ConnectAndListen(ctx context.Context) error {
 
 	log.Println("[DEBUG] WebSocket connection established")
 
-	playerChannelName := fmt.Sprintf("private-player.%s", pc.cfg.PlayerID)
+	playerChannelName := fmt.Sprintf("private-player.%s", pc.cfg.PlayerName)
 	pch, err := pc.client.Subscribe(playerChannelName)
 	if err != nil {
 		log.Printf("[ERROR] Failed to subscribe to %s: %v", playerChannelName, err)

@@ -145,7 +145,7 @@ func handlePrepareSwap(cfg *Config, payload json.RawMessage) {
 
 	// Upload to server
 	uploadURL := fmt.Sprintf("%s/api/upload-save", cfg.ServerURL)
-	if err := UploadFile(uploadURL, savePath, cfg.PlayerID, cfg.SessionName); err != nil {
+	if err := UploadFile(uploadURL, savePath, cfg.PlayerName, cfg.SessionName); err != nil {
 		log.Println("Error uploading save state:", err)
 	} else {
 		log.Println("Save state uploaded successfully")

@@ -36,7 +36,6 @@ func initLogging() {
 }
 
 func main() {
-	// Define -v flag
 	flag.BoolVar(&verbose, "v", false, "Enable verbose logging to console")
 	flag.Parse()
 
@@ -68,7 +67,7 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				ping = sendHeartbeat(cfg, ping, "unknown") // TODO: replace with real ping/game
+				ping = sendHeartbeat(cfg, ping, "unknown")
 			}
 		}
 	}()

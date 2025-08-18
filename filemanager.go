@@ -19,6 +19,10 @@ func DownloadFile(url, dest string) error {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to download %s: %s", url, resp.Status)
+	}
+
 	os.MkdirAll(filepath.Dir(dest), 0755)
 	out, err := os.Create(dest)
 	if err != nil {
@@ -43,7 +47,7 @@ func waitForFile(path string, timeoutSeconds int) {
 	log.Println("Warning: save state file not found:", path)
 }
 
-func UploadFile(url, path, playerID, sessionID string) error {
+func UploadFile(url, path, playerName, sessionName string) error {
 	file, err := os.Open(path)
 	if err != nil {
 		return err
@@ -61,8 +65,8 @@ func UploadFile(url, path, playerID, sessionID string) error {
 		return err
 	}
 
-	_ = writer.WriteField("player_id", playerID)
-	_ = writer.WriteField("session_id", sessionID)
+	_ = writer.WriteField("player_name", playerName)
+	_ = writer.WriteField("session_name", sessionName)
 
 	if err := writer.Close(); err != nil {
 		return err
