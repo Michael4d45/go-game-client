@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -9,145 +10,138 @@ import (
 	"time"
 )
 
-func handleSwap(cfg *Config, payload json.RawMessage) {
+// handleSwap writes a swap_trigger.txt for Lua to pick up
+func handleSwap(cfg *Config, state *ClientState, payload json.RawMessage) {
 	var data struct {
 		RoundNumber int    `json:"round_number"`
-		SwapAt      string `json:"swap_at"` // ISO8601 UTC
-		NewGame     string `json:"new_game"`
-		SaveURL     string `json:"save_url"`
+		GameName    string `json:"game_name"`
+		SwapTime    int64  `json:"swap_time"` // epoch seconds
 	}
 	if err := json.Unmarshal(payload, &data); err != nil {
-		log.Println("Error parsing swap:", err)
+		log.Printf("handleSwap: bad payload: %v", err)
 		return
 	}
 
-	log.Printf("Swap command: round %d, new game: %s at %s", data.RoundNumber, data.NewGame, data.SwapAt)
-
-	// Parse swap_at into epoch seconds
-	swapTime, err := time.Parse(time.RFC3339, data.SwapAt)
-	if err != nil {
-		log.Println("Error parsing swap_at:", err)
+	trigger := fmt.Sprintf("%d\n%s\n", data.SwapTime, data.GameName)
+	if err := os.WriteFile("swap_trigger.txt", []byte(trigger), 0o644); err != nil {
+		log.Printf("handleSwap: write trigger failed: %v", err)
 		return
 	}
-	swapEpoch := swapTime.Unix()
+	log.Printf("Swap scheduled for game %s at %d", data.GameName, data.SwapTime)
 
-	// --- STEP 1: Download ROM if needed ---
-	romPath := filepath.Join("roms", data.NewGame)
-	if _, err := os.Stat(romPath); os.IsNotExist(err) {
-		log.Println("Downloading ROM:", data.NewGame)
-		DownloadFile(fmt.Sprintf("%s/api/roms/%s", cfg.ServerURL, data.NewGame), romPath)
-	}
+	// update state
+	state.SetCurrentGame(data.GameName)
 
-	// --- STEP 2: Download save state if provided ---
-	if data.SaveURL != "" {
-		savePath := filepath.Join("saves", fmt.Sprintf("%s.state", data.NewGame))
-		log.Println("Downloading save state:", savePath)
-		DownloadFile(data.SaveURL, savePath)
-	}
-
-	// --- STEP 3: Write swap trigger with timestamp + game name ---
-	swapFile := fmt.Sprintf("%d\n%s", swapEpoch, data.NewGame)
-	os.WriteFile("swap_trigger.txt", []byte(swapFile), 0644)
-
-	log.Printf("Swap scheduled for %s (epoch: %d)", data.SwapAt, swapEpoch)
-	notifySwapComplete(cfg, data.RoundNumber)
+	// notify server when swap is complete (after swap time)
+	go func() {
+		now := time.Now().Unix()
+		if data.SwapTime > now {
+			time.Sleep(time.Duration(data.SwapTime-now) * time.Second)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := notifySwapComplete(ctx, cfg, data.RoundNumber); err != nil {
+			log.Printf("notifySwapComplete error: %v", err)
+		}
+	}()
 }
 
-func handleDownloadROM(payload json.RawMessage) {
+func handleDownloadROM(cfg *Config, payload json.RawMessage) {
 	var data struct {
-		RomName string `json:"rom_name"`
-		RomURL  string `json:"rom_url"`
+		File string `json:"file"`
 	}
 	if err := json.Unmarshal(payload, &data); err != nil {
-		log.Println("Error parsing download_rom:", err)
+		log.Printf("handleDownloadROM: bad payload: %v", err)
 		return
 	}
-	log.Printf("Downloading ROM: %s", data.RomName)
-	DownloadFile(data.RomURL, filepath.Join("roms", data.RomName))
+	dest := filepath.Join(cfg.RomDir, data.File)
+	url := cfg.ServerURL + "/api/roms/" + data.File
+	if err := DownloadFile(url, dest); err != nil {
+		log.Printf("handleDownloadROM: download failed: %v", err)
+	} else {
+		log.Printf("Downloaded ROM: %s", data.File)
+	}
 }
 
-func handleDownloadLua(payload json.RawMessage) {
+func handleDownloadLua(cfg *Config, payload json.RawMessage) {
 	var data struct {
-		LuaVersion string `json:"lua_version"`
-		LuaURL     string `json:"lua_url"`
+		Filename string `json:"filename"`
 	}
 	if err := json.Unmarshal(payload, &data); err != nil {
-		log.Println("Error parsing download_lua:", err)
+		log.Printf("handleDownloadLua: bad payload: %v", err)
 		return
 	}
-	log.Printf("Downloading Lua script v%s", data.LuaVersion)
-	DownloadFile(data.LuaURL, filepath.Join("scripts", fmt.Sprintf("swap_v%s.lua", data.LuaVersion)))
+	dest := filepath.Join("scripts", data.Filename)
+	url := cfg.ServerURL + "/api/scripts/latest"
+	if err := DownloadFile(url, dest); err != nil {
+		log.Printf("handleDownloadLua: download failed: %v", err)
+	} else {
+		log.Printf("Downloaded Lua script: %s", data.Filename)
+	}
 }
 
 func handleServerMessage(payload json.RawMessage) {
 	var data struct {
-		Text string `json:"text"`
+		Message string `json:"message"`
 	}
 	if err := json.Unmarshal(payload, &data); err != nil {
-		log.Println("Error parsing message:", err)
+		log.Printf("handleServerMessage: bad payload: %v", err)
 		return
 	}
-	log.Println("[SERVER MESSAGE]", data.Text)
+	log.Printf("[SERVER MESSAGE] %s", data.Message)
 }
 
 func handleKick(payload json.RawMessage) {
 	var data struct {
 		Reason string `json:"reason"`
 	}
-	if err := json.Unmarshal(payload, &data); err != nil {
-		log.Println("Error parsing kick:", err)
-		return
-	}
-	log.Printf("Kicked from server: %s", data.Reason)
-	os.Exit(0)
+	_ = json.Unmarshal(payload, &data)
+	log.Printf("[KICKED] Reason: %s", data.Reason)
+	os.Exit(1)
 }
 
-func handleStartGame(cfg *Config, payload json.RawMessage) {
-	log.Printf("[EVENT] Start game")
-
-	// TODO: Launch BizHawk with this game immediately
-	romPath := filepath.Join(cfg.RomDir, cfg.SessionName)
-	if _, err := os.Stat(romPath); os.IsNotExist(err) {
-		log.Println("Downloading ROM:", cfg.SessionName)
-		DownloadFile(fmt.Sprintf("%s/api/roms/%s", cfg.ServerURL, cfg.SessionName), romPath)
+func handleStartGame(cfg *Config, state *ClientState, payload json.RawMessage) {
+	var data struct {
+		GameName string `json:"game_name"`
 	}
-	// Optionally trigger Lua to load immediately
+	if err := json.Unmarshal(payload, &data); err != nil {
+		log.Printf("handleStartGame: bad payload: %v", err)
+		return
+	}
+	state.SetCurrentGame(data.GameName)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := sendGameStarted(ctx, cfg, data.GameName); err != nil {
+		log.Printf("sendGameStarted error: %v", err)
+	}
 }
 
 func handlePauseGame(cfg *Config, payload json.RawMessage) {
-	log.Println("[EVENT] Pause game")
-	// TODO: Implement pause logic (e.g., send pause trigger to Lua)
+	log.Printf("Game paused (payload: %s)", string(payload))
+	// Could write a pause_trigger.txt for Lua if needed
 }
 
-func handleSessionEnded(cfg *Config, payload json.RawMessage) {
-	log.Println("[EVENT] Session ended by server")
-	// TODO: Clean up, stop BizHawk, etc.
-	os.Exit(0)
+func handleSessionEnded(cfg *Config, state *ClientState, payload json.RawMessage) {
+	log.Printf("Session ended (payload: %s)", string(payload))
+	state.SetConnected(false)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := sendGameStopped(ctx, cfg); err != nil {
+		log.Printf("sendGameStopped error: %v", err)
+	}
 }
 
-func handlePrepareSwap(cfg *Config, payload json.RawMessage) {
+func handlePrepareSwap(cfg *Config, state *ClientState, payload json.RawMessage) {
 	var data struct {
-		RoundNumber int    `json:"round_number"`
-		UploadBy    string `json:"upload_by"` // ISO8601 UTC
+		SavePath string `json:"save_path"`
 	}
 	if err := json.Unmarshal(payload, &data); err != nil {
-		log.Println("Error parsing prepare_swap:", err)
+		log.Printf("handlePrepareSwap: bad payload: %v", err)
 		return
 	}
-	log.Printf("[EVENT] Prepare swap for round %d, upload by %s", data.RoundNumber, data.UploadBy)
-
-	// Trigger Lua to save state
-	savePath := filepath.Join(cfg.SaveDir, "current.state")
-	os.WriteFile("save_trigger.txt", []byte(savePath), 0644)
-
-	// Wait for Lua to write the file
-	waitForFile(savePath, 5)
-
-	// Upload to server
-	uploadURL := fmt.Sprintf("%s/api/upload-save", cfg.ServerURL)
-	if err := UploadFile(uploadURL, savePath, cfg.PlayerName, cfg.SessionName); err != nil {
-		log.Println("Error uploading save state:", err)
-	} else {
-		log.Println("Save state uploaded successfully")
+	// Write save_trigger.txt for Lua
+	if err := os.WriteFile("save_trigger.txt", []byte(data.SavePath+"\n"), 0o644); err != nil {
+		log.Printf("handlePrepareSwap: write trigger failed: %v", err)
 	}
+	log.Printf("Prepare swap: saving state to %s", data.SavePath)
 }

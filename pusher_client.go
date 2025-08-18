@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"time"
 
 	pusher "github.com/bencurio/pusher-ws-go"
 )
@@ -13,13 +14,39 @@ import (
 type PusherClient struct {
 	client *pusher.Client
 	cfg    *Config
+	state  *ClientState
 }
 
-func NewPusherClient(cfg *Config) *PusherClient {
-	return &PusherClient{cfg: cfg}
+func NewPusherClient(cfg *Config, state *ClientState) *PusherClient {
+	return &PusherClient{cfg: cfg, state: state}
 }
 
 func (pc *PusherClient) ConnectAndListen(ctx context.Context) error {
+	backoff := time.Second
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		if err := pc.connectOnce(ctx); err != nil {
+			log.Printf("[ERROR] Pusher connect failed: %v", err)
+			pc.state.SetConnected(false)
+			time.Sleep(backoff)
+			if backoff < 30*time.Second {
+				backoff *= 2
+			}
+			continue
+		}
+
+		backoff = time.Second
+		<-ctx.Done()
+		return nil
+	}
+}
+
+func (pc *PusherClient) connectOnce(ctx context.Context) error {
 	authURL := fmt.Sprintf("%s/broadcasting/auth", pc.cfg.ServerURL)
 	log.Printf("[DEBUG] Auth URL: %s", authURL)
 
@@ -33,63 +60,52 @@ func (pc *PusherClient) ConnectAndListen(ctx context.Context) error {
 		OverrideHost: pc.cfg.ServerHost,
 		OverridePort: pc.cfg.PusherPort,
 	}
-	log.Printf("[DEBUG] Creating pusher.Client with settings:\n"+
-		"Insecure: %v\n"+
-		"AuthURL: %s\n"+
-		"AuthHeaders: %v\n"+
-		"OverrideHost: %s\n"+
-		"OverridePort: %d\n",
-		pc.cfg.ServerScheme == "http",
-		authURL,
-		http.Header{
-			"Authorization": []string{"Bearer " + pc.cfg.BearerToken},
-			"Accept":        []string{"application/json"},
-		},
-		pc.cfg.ServerHost,
-		pc.cfg.PusherPort,
-	)
 
 	if err := pc.client.Connect(pc.cfg.AppKey); err != nil {
-		return fmt.Errorf("[ERROR] Pusher connect error: %w", err)
+		return fmt.Errorf("pusher connect error: %w", err)
 	}
-
 	log.Println("[DEBUG] WebSocket connection established")
-
+	pc.state.SetConnected(true)
+	// Subscribe to player channel
 	playerChannelName := fmt.Sprintf("private-player.%s", pc.cfg.PlayerName)
 	pch, err := pc.client.Subscribe(playerChannelName)
 	if err != nil {
-		log.Printf("[ERROR] Failed to subscribe to %s: %v", playerChannelName, err)
-	} else {
-		log.Printf("[DEBUG] Subscribed to channel: %s", playerChannelName)
+		return fmt.Errorf("subscribe %s: %w", playerChannelName, err)
 	}
+	log.Printf("[DEBUG] Subscribed to channel: %s", playerChannelName)
 
-	for _, ev := range []string{"command"} {
-		go func(eventName string) {
-			log.Printf("[DEBUG] %s: Subscribed to event: %s", playerChannelName, eventName)
-			for raw := range pch.Bind(eventName) {
-				pc.handleRawEvent(raw)
-			}
-		}(ev)
-	}
-
+	// Subscribe to session channel
 	sessionChannelName := fmt.Sprintf("private-session.%s", pc.cfg.SessionName)
 	sch, err := pc.client.Subscribe(sessionChannelName)
 	if err != nil {
-		log.Printf("[ERROR] Failed to subscribe to %s: %v", sessionChannelName, err)
-	} else {
-		log.Printf("[DEBUG] Subscribed to channel: %s", sessionChannelName)
+		return fmt.Errorf("subscribe %s: %w", sessionChannelName, err)
 	}
+	log.Printf("[DEBUG] Subscribed to channel: %s", sessionChannelName)
 
+	// Bind events
 	for _, ev := range []string{"command"} {
-		go func(eventName string) {
-			log.Printf("[DEBUG] %s: Subscribed to event: %s", sessionChannelName, eventName)
-			for raw := range sch.Bind(eventName) {
-				pc.handleRawEvent(raw)
-			}
-		}(ev)
+		go pc.listenChannel(ctx, pch, playerChannelName, ev)
+		go pc.listenChannel(ctx, sch, sessionChannelName, ev)
 	}
 
 	return nil
+}
+
+func (pc *PusherClient) listenChannel(ctx context.Context, ch pusher.Channel, channelName, eventName string) {
+    log.Printf("[DEBUG] %s: Subscribed to event: %s", channelName, eventName)
+    for {
+        select {
+        case <-ctx.Done():
+            return
+        case raw, ok := <-ch.Bind(eventName):
+            if !ok {
+                log.Printf("[WARN] Channel %s closed", channelName)
+                pc.state.SetConnected(false)
+                return
+            }
+            pc.handleRawEvent(raw)
+        }
+    }
 }
 
 func (pc *PusherClient) handleRawEvent(raw json.RawMessage) {
@@ -110,24 +126,30 @@ func (pc *PusherClient) handleRawEvent(raw json.RawMessage) {
 
 	switch msg.Type {
 	case "swap":
-		handleSwap(pc.cfg, msg.Payload)
+		handleSwap(pc.cfg, pc.state, msg.Payload)
 	case "download_rom":
-		handleDownloadROM(msg.Payload)
+		handleDownloadROM(pc.cfg, msg.Payload)
 	case "download_lua":
-		handleDownloadLua(msg.Payload)
+		handleDownloadLua(pc.cfg, msg.Payload)
 	case "message":
 		handleServerMessage(msg.Payload)
 	case "kick":
 		handleKick(msg.Payload)
 	case "start_game":
-		handleStartGame(pc.cfg, msg.Payload)
+		handleStartGame(pc.cfg, pc.state, msg.Payload)
 	case "pause_game":
 		handlePauseGame(pc.cfg, msg.Payload)
 	case "session_ended":
-		handleSessionEnded(pc.cfg, msg.Payload)
+		handleSessionEnded(pc.cfg, pc.state, msg.Payload)
 	case "prepare_swap":
-		handlePrepareSwap(pc.cfg, msg.Payload)
+		handlePrepareSwap(pc.cfg, pc.state, msg.Payload)
 	default:
 		log.Printf("[WARN] Unknown event type: %s", msg.Type)
 	}
+}
+
+// WSMessage is the envelope for Pusher events
+type WSMessage struct {
+	Type    string          `json:"type"`
+	Payload json.RawMessage `json:"payload"`
 }

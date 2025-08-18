@@ -2,35 +2,38 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"time"
 )
 
-// sendHeartbeat sends ping + current game to Laravel
-func sendHeartbeat(cfg *Config, ping int, currentGame string) int {
+var httpClient = &http.Client{
+	Timeout: 20 * time.Second,
+}
+
+// sendHeartbeat posts a heartbeat and returns measured ping (ms).
+func sendHeartbeat(ctx context.Context, cfg *Config, state *ClientState) (int, error) {
 	payload := map[string]any{
-		"ping":         ping,
-		"current_game": currentGame,
+		"ping":         state.GetPing(),
+		"current_game": state.GetCurrentGame(),
 	}
 	body, _ := json.Marshal(payload)
 
-	req, err := http.NewRequest("POST", cfg.ServerURL+"/api/heartbeat", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", cfg.ServerURL+"/api/heartbeat", bytes.NewReader(body))
 	if err != nil {
-		log.Printf("Heartbeat request error: %v", err)
-		return 0
+		return 0, fmt.Errorf("heartbeat request error: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+cfg.BearerToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
 	start := time.Now()
-
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
-		log.Printf("Heartbeat send error: %v", err)
-		return 0
+		return 0, fmt.Errorf("heartbeat send error: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -39,107 +42,124 @@ func sendHeartbeat(cfg *Config, ping int, currentGame string) int {
 
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("Heartbeat failed: %s", resp.Status)
+		// still return measured ping
+		return newPing, fmt.Errorf("heartbeat status: %s", resp.Status)
 	}
 
-	return newPing
+	// update state lastHeartbeat + ping
+	state.SetPing(newPing)
+	return newPing, nil
 }
 
-// sendReady notifies Laravel that the player is ready
-func sendReady(cfg *Config) {
-	req, err := http.NewRequest("POST", cfg.ServerURL+"/api/ready", nil)
+// sendReady notifies Laravel that the player is ready.
+func sendReady(ctx context.Context, cfg *Config, state *ClientState) error {
+	req, err := http.NewRequestWithContext(ctx, "POST", cfg.ServerURL+"/api/ready", nil)
 	if err != nil {
-		log.Printf("Ready request error: %v", err)
-		return
+		return fmt.Errorf("ready request error: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+cfg.BearerToken)
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
-		log.Printf("Ready send error: %v", err)
-		return
+		return fmt.Errorf("ready send error: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("Ready failed: %s", resp.Status)
+		return fmt.Errorf("ready failed: %s", resp.Status)
 	}
+
+	state.SetReady(true)
+	return nil
 }
 
 // notifySwapComplete tells Laravel the swap is done
-func notifySwapComplete(cfg *Config, roundNumber int) {
+func notifySwapComplete(ctx context.Context, cfg *Config, roundNumber int) error {
 	payload := map[string]any{
 		"round_number": roundNumber,
 	}
 	body, _ := json.Marshal(payload)
 
-	req, err := http.NewRequest("POST", cfg.ServerURL+"/api/swap-complete", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(
+		ctx,
+		"POST",
+		cfg.ServerURL+"/api/swap-complete",
+		bytes.NewReader(body),
+	)
 	if err != nil {
-		log.Printf("Swap-complete request error: %v", err)
-		return
+		return fmt.Errorf("swap-complete request error: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+cfg.BearerToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
-		log.Printf("Swap-complete send error: %v", err)
-		return
+		return fmt.Errorf("swap-complete send error: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("Swap-complete failed: %s", resp.Status)
+		return fmt.Errorf("swap-complete failed: %s", resp.Status)
 	}
+	return nil
 }
 
 // sendGameStarted tells Laravel which game started
-func sendGameStarted(cfg *Config, gameName string) {
+func sendGameStarted(ctx context.Context, cfg *Config, gameName string) error {
 	payload := map[string]any{
 		"current_game": gameName,
 	}
 	body, _ := json.Marshal(payload)
 
-	req, err := http.NewRequest("POST", cfg.ServerURL+"/api/game-started", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(
+		ctx,
+		"POST",
+		cfg.ServerURL+"/api/game-started",
+		bytes.NewReader(body),
+	)
 	if err != nil {
-		log.Printf("Game-started request error: %v", err)
-		return
+		return fmt.Errorf("game-started request error: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+cfg.BearerToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
-		log.Printf("Game-started send error: %v", err)
-		return
+		return fmt.Errorf("game-started send error: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("Game-started failed: %s", resp.Status)
+		return fmt.Errorf("game-started failed: %s", resp.Status)
 	}
+	return nil
 }
 
 // sendGameStopped tells Laravel the game stopped
-func sendGameStopped(cfg *Config) {
-	req, err := http.NewRequest("POST", cfg.ServerURL+"/api/game-stopped", nil)
+func sendGameStopped(ctx context.Context, cfg *Config) error {
+	req, err := http.NewRequestWithContext(
+		ctx,
+		"POST",
+		cfg.ServerURL+"/api/game-stopped",
+		nil,
+	)
 	if err != nil {
-		log.Printf("Game-stopped request error: %v", err)
-		return
+		return fmt.Errorf("game-stopped request error: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+cfg.BearerToken)
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
-		log.Printf("Game-stopped send error: %v", err)
-		return
+		return fmt.Errorf("game-stopped send error: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("Game-stopped failed: %s", resp.Status)
+		return fmt.Errorf("game-stopped failed: %s", resp.Status)
 	}
+	return nil
 }

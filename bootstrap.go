@@ -3,6 +3,7 @@ package main
 import (
 	"archive/zip"
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,9 +16,15 @@ import (
 )
 
 func Bootstrap(cfg *Config) error {
-	os.MkdirAll(cfg.RomDir, 0755)
-	os.MkdirAll(cfg.SaveDir, 0755)
-	os.MkdirAll("scripts", 0755)
+	if err := os.MkdirAll(cfg.RomDir, 0o755); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(cfg.SaveDir, 0o755); err != nil {
+		return err
+	}
+	if err := os.MkdirAll("scripts", 0o755); err != nil {
+		return err
+	}
 
 	zipFileName := filepath.Base(cfg.BizHawkDownloadURL)
 	installDir := strings.TrimSuffix(zipFileName, filepath.Ext(zipFileName))
@@ -41,7 +48,7 @@ func Bootstrap(cfg *Config) error {
 
 			token, appKey, err := registerPlayer(cfg.ServerURL, cfg.PlayerName)
 			if err != nil {
-				log.Println(fmt.Errorf("%w", err))
+				log.Printf("registerPlayer failed: %v", err)
 				fmt.Println("failed to register player")
 				continue
 			}
@@ -125,6 +132,7 @@ func Bootstrap(cfg *Config) error {
 	}
 	cfg.LuaScript = luaDest
 
+	// Save updated config (bearer token, app key, session)
 	return SaveConfig(cfg, "config.json")
 }
 
@@ -143,18 +151,25 @@ func DownloadAndExtract(url, zipPath, dest string) error {
 	for _, f := range r.File {
 		fpath := filepath.Join(dest, f.Name)
 		if f.FileInfo().IsDir() {
-			os.MkdirAll(fpath, f.Mode())
+			if err := os.MkdirAll(fpath, f.Mode()); err != nil {
+				return err
+			}
 			continue
 		}
-		if err := os.MkdirAll(filepath.Dir(fpath), 0755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(fpath), 0o755); err != nil {
 			return err
 		}
-		outFile, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
+		outFile, err := os.OpenFile(
+			fpath,
+			os.O_WRONLY|os.O_CREATE|os.O_TRUNC,
+			f.Mode(),
+		)
 		if err != nil {
 			return err
 		}
 		rc, err := f.Open()
 		if err != nil {
+			outFile.Close()
 			return err
 		}
 		_, err = io.Copy(outFile, rc)
@@ -167,36 +182,58 @@ func DownloadAndExtract(url, zipPath, dest string) error {
 	return nil
 }
 
+// DownloadFile streams the URL to dest (overwrites dest).
+func DownloadFile(url, dest string) error {
+	log.Printf("DownloadFile: %s -> %s", url, dest)
+
+	// ensure parent dir exists
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return err
+	}
+
+	resp, err := httpClient.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("download failed: %s", resp.Status)
+	}
+
+	out, err := os.Create(dest)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, resp.Body)
+	return err
+}
+
 func registerPlayer(serverURL, playerName string) (string, string, error) {
-	// Prepare request body
-	reqBody := strings.NewReader(fmt.Sprintf(`{"name":"%s"}`, playerName))
+	payload := map[string]string{"name": playerName}
+	body, _ := json.Marshal(payload)
 
-	log.Println("Registering player: " + playerName)
+	log.Printf("Registering player: %s", playerName)
 
-	// Create a new request
-	req, err := http.NewRequest("POST", serverURL+"/api/register-player", reqBody)
+	req, err := http.NewRequest("POST", serverURL+"/api/register-player", bytes.NewReader(body))
 	if err != nil {
 		return "", "", err
 	}
-
-	// Set headers
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
-	// Send request
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", "", err
 	}
 	defer resp.Body.Close()
 
-	// Check status
 	if resp.StatusCode != http.StatusOK {
 		return "", "", fmt.Errorf("server returned %s", resp.Status)
 	}
 
-	// Decode JSON response
 	var data struct {
 		BearerToken  string `json:"bearer_token"`
 		ReverbAppKey string `json:"reverb_app_key"`
@@ -216,7 +253,7 @@ func checkSessionExists(serverURL, sessionName, token string) (bool, error) {
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return false, err
 	}
@@ -249,7 +286,7 @@ func joinSession(serverURL, sessionName, token string) ([]string, error) {
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -264,7 +301,6 @@ func joinSession(serverURL, sessionName, token string) ([]string, error) {
 		return nil, err
 	}
 
-	// Extract just the file names
 	var gameFiles []string
 	for _, g := range session.Games {
 		gameFiles = append(gameFiles, g.File)
@@ -280,11 +316,9 @@ func checkTokenExists(serverURL, token string) bool {
 		return false
 	}
 
-	// Set Authorization header
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
 
-	// Log request info (mask token for safety)
 	maskedToken := "<empty>"
 	if len(token) > 8 {
 		maskedToken = token[:6] + "..."
@@ -298,7 +332,7 @@ func checkTokenExists(serverURL, token string) bool {
 		maskedToken,
 	)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		log.Printf("checkTokenExists: request failed: %v", err)
 		return false
