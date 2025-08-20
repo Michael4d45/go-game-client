@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -12,13 +11,18 @@ import (
 )
 
 type PusherClient struct {
-	client *pusher.Client
-	cfg    *Config
-	state  *ClientState
+	client   *pusher.Client
+	cfg      *Config
+	state    *ClientState
+	handlers *Handlers
 }
 
-func NewPusherClient(cfg *Config, state *ClientState) *PusherClient {
-	return &PusherClient{cfg: cfg, state: state}
+func NewPusherClient(cfg *Config, state *ClientState, api *API, ipc *BizhawkIPC) *PusherClient {
+	return &PusherClient{
+		cfg:      cfg,
+		state:    state,
+		handlers: NewHandlers(api, cfg, state, ipc),
+	}
 }
 
 func (pc *PusherClient) ConnectAndListen(ctx context.Context) error {
@@ -66,7 +70,7 @@ func (pc *PusherClient) connectOnce(ctx context.Context) error {
 	}
 	log.Println("[DEBUG] WebSocket connection established")
 	pc.state.SetConnected(true)
-	// Subscribe to player channel
+
 	playerChannelName := fmt.Sprintf("private-player.%s", pc.cfg.PlayerName)
 	pch, err := pc.client.Subscribe(playerChannelName)
 	if err != nil {
@@ -74,7 +78,6 @@ func (pc *PusherClient) connectOnce(ctx context.Context) error {
 	}
 	log.Printf("[DEBUG] Subscribed to channel: %s", playerChannelName)
 
-	// Subscribe to session channel
 	sessionChannelName := fmt.Sprintf("private-session.%s", pc.cfg.SessionName)
 	sch, err := pc.client.Subscribe(sessionChannelName)
 	if err != nil {
@@ -82,7 +85,6 @@ func (pc *PusherClient) connectOnce(ctx context.Context) error {
 	}
 	log.Printf("[DEBUG] Subscribed to channel: %s", sessionChannelName)
 
-	// Bind events
 	for _, ev := range []string{"command"} {
 		go pc.listenChannel(ctx, pch, playerChannelName, ev)
 		go pc.listenChannel(ctx, sch, sessionChannelName, ev)
@@ -91,65 +93,31 @@ func (pc *PusherClient) connectOnce(ctx context.Context) error {
 	return nil
 }
 
-func (pc *PusherClient) listenChannel(ctx context.Context, ch pusher.Channel, channelName, eventName string) {
-    log.Printf("[DEBUG] %s: Subscribed to event: %s", channelName, eventName)
-    for {
-        select {
-        case <-ctx.Done():
-            return
-        case raw, ok := <-ch.Bind(eventName):
-            if !ok {
-                log.Printf("[WARN] Channel %s closed", channelName)
-                pc.state.SetConnected(false)
-                return
-            }
-            pc.handleRawEvent(raw)
-        }
-    }
-}
+func (pc *PusherClient) listenChannel(
+	ctx context.Context,
+	ch pusher.Channel,
+	channelName, eventName string,
+) {
+	log.Printf("[DEBUG] %s: Subscribed to event: %s", channelName, eventName)
 
-func (pc *PusherClient) handleRawEvent(raw json.RawMessage) {
-	log.Printf("[DEBUG] Raw event from Pusher: %s", string(raw))
+	boundChan := ch.Bind(eventName)
 
-	var inner string
-	if err := json.Unmarshal(raw, &inner); err != nil {
-		log.Printf("[ERROR] Unmarshal outer event: %v", err)
-		return
+	defer func() {
+		ch.Unbind(eventName, boundChan)
+		log.Printf("[DEBUG] %s: Unbound from event: %s", channelName, eventName)
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case raw, ok := <-boundChan:
+			if !ok {
+				log.Printf("[WARN] Channel %s closed", channelName)
+				pc.state.SetConnected(false)
+				return
+			}
+			pc.handlers.handleRawEvent(raw)
+		}
 	}
-	log.Printf("[DEBUG] Outer JSON string: %s", inner)
-
-	var msg WSMessage
-	if err := json.Unmarshal([]byte(inner), &msg); err != nil {
-		log.Printf("[ERROR] Unmarshal inner WSMessage: %v", err)
-		return
-	}
-
-	switch msg.Type {
-	case "swap":
-		handleSwap(pc.cfg, pc.state, msg.Payload)
-	case "download_rom":
-		handleDownloadROM(pc.cfg, msg.Payload)
-	case "download_lua":
-		handleDownloadLua(pc.cfg, msg.Payload)
-	case "message":
-		handleServerMessage(msg.Payload)
-	case "kick":
-		handleKick(msg.Payload)
-	case "start_game":
-		handleStartGame(pc.cfg, pc.state, msg.Payload)
-	case "pause_game":
-		handlePauseGame(pc.cfg, msg.Payload)
-	case "session_ended":
-		handleSessionEnded(pc.cfg, pc.state, msg.Payload)
-	case "prepare_swap":
-		handlePrepareSwap(pc.cfg, pc.state, msg.Payload)
-	default:
-		log.Printf("[WARN] Unknown event type: %s", msg.Type)
-	}
-}
-
-// WSMessage is the envelope for Pusher events
-type WSMessage struct {
-	Type    string          `json:"type"`
-	Payload json.RawMessage `json:"payload"`
 }

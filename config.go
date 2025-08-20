@@ -25,7 +25,9 @@ type Config struct {
 	RomDir             string `json:"rom_dir"`
 	SaveDir            string `json:"save_dir"`
 
-	// Computed fields — omit from JSON
+	BizhawkIPCPort int `json:"bizhawk_ipc_port"`
+
+	// Computed
 	ServerURL string `json:"-"`
 }
 
@@ -52,8 +54,9 @@ func DefaultConfig() *Config {
 		LuaScript:          "scripts\\swap_latest.lua",
 		RomDir:             "roms",
 		SaveDir:            "saves",
-	}
 
+		BizhawkIPCPort: 55355,
+	}
 	cfg.ComputeURLs()
 	return cfg
 }
@@ -79,6 +82,10 @@ func LoadConfig(path string) (*Config, error) {
 	var cfg Config
 	if err := json.NewDecoder(f).Decode(&cfg); err != nil {
 		return nil, err
+	}
+
+	if cfg.BizhawkIPCPort == 0 {
+		cfg.BizhawkIPCPort = 55355
 	}
 
 	cfg.ComputeURLs()

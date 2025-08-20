@@ -3,8 +3,7 @@ package main
 import (
 	"archive/zip"
 	"bufio"
-	"bytes"
-	"encoding/json"
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -38,15 +37,18 @@ func Bootstrap(cfg *Config) error {
 		fmt.Println("BizHawk installed in", installDir)
 	}
 
+	api := NewAPI(cfg)
 	reader := bufio.NewReader(os.Stdin)
+	ctx := context.Background()
 
+	// --- Player registration / token check ---
 	for {
 		if cfg.PlayerName == "" || cfg.BearerToken == "" || cfg.AppKey == "" {
 			fmt.Print("Enter your desired player ID: ")
 			playerName, _ := reader.ReadString('\n')
 			cfg.PlayerName = strings.TrimSpace(playerName)
 
-			token, appKey, err := registerPlayer(cfg.ServerURL, cfg.PlayerName)
+			token, appKey, err := api.RegisterPlayer(ctx, cfg.PlayerName)
 			if err != nil {
 				log.Printf("registerPlayer failed: %v", err)
 				fmt.Println("failed to register player")
@@ -54,21 +56,28 @@ func Bootstrap(cfg *Config) error {
 			}
 			cfg.BearerToken = token
 			cfg.AppKey = appKey
+			api = NewAPI(cfg) // refresh API with new bearer
 			break
 		}
 
-		if checkTokenExists(cfg.ServerURL, cfg.BearerToken) {
-			break
-		} else {
-			log.Println("check token failed")
+		ok, err := api.CheckTokenExists(ctx, cfg.BearerToken)
+		if err != nil {
+			log.Printf("check token failed: %v", err)
 			cfg.BearerToken = ""
 			cfg.AppKey = ""
+			continue
 		}
+		if ok {
+			break
+		}
+		cfg.BearerToken = ""
+		cfg.AppKey = ""
 	}
 
+	// --- Session join ---
 	for {
 		if cfg.SessionName != "" {
-			exists, err := checkSessionExists(cfg.ServerURL, cfg.SessionName, cfg.BearerToken)
+			exists, err := api.CheckSessionExists(ctx, cfg.SessionName)
 			if err != nil {
 				return err
 			}
@@ -80,30 +89,28 @@ func Bootstrap(cfg *Config) error {
 
 		fmt.Print("Enter game session name: ")
 		sessionName, _ := reader.ReadString('\n')
-		sessionName = strings.TrimSpace(sessionName)
-		cfg.SessionName = sessionName
+		cfg.SessionName = strings.TrimSpace(sessionName)
 	}
 
-	games, err := joinSession(cfg.ServerURL, cfg.SessionName, cfg.BearerToken)
+	games, err := api.JoinSession(ctx, cfg.SessionName)
 	if err != nil {
 		return err
 	}
 
+	// --- Download missing games ---
 	var wg sync.WaitGroup
-	errCh := make(chan error, len(games)) // collect errors
+	errCh := make(chan error, len(games))
 
 	for _, g := range games {
 		localPath := filepath.Join(cfg.RomDir, g)
 
-		// Check if already exists
 		if _, err := os.Stat(localPath); err == nil {
 			fmt.Println("Game already exists:", g)
 			continue
 		}
 
-		// Missing → download in parallel
 		wg.Add(1)
-		go func(gameFile string, dest string) {
+		go func(gameFile, dest string) {
 			defer wg.Done()
 			fmt.Println("Downloading:", gameFile)
 			romURL := cfg.ServerURL + "/api/roms/" + gameFile
@@ -114,17 +121,15 @@ func Bootstrap(cfg *Config) error {
 		}(g, localPath)
 	}
 
-	// Wait for all downloads
 	wg.Wait()
 	close(errCh)
-
-	// If any errors occurred, return the first one
 	for e := range errCh {
 		if e != nil {
 			return e
 		}
 	}
 
+	// --- Download latest Lua script ---
 	luaURL := cfg.ServerURL + "/api/scripts/latest"
 	luaDest := filepath.Join("scripts", "swap_latest.lua")
 	if err := DownloadFile(luaURL, luaDest); err != nil {
@@ -132,7 +137,7 @@ func Bootstrap(cfg *Config) error {
 	}
 	cfg.LuaScript = luaDest
 
-	// Save updated config (bearer token, app key, session)
+	// Save updated config
 	return SaveConfig(cfg, "config.json")
 }
 
@@ -209,145 +214,4 @@ func DownloadFile(url, dest string) error {
 
 	_, err = io.Copy(out, resp.Body)
 	return err
-}
-
-func registerPlayer(serverURL, playerName string) (string, string, error) {
-	payload := map[string]string{"name": playerName}
-	body, _ := json.Marshal(payload)
-
-	log.Printf("Registering player: %s", playerName)
-
-	req, err := http.NewRequest("POST", serverURL+"/api/register-player", bytes.NewReader(body))
-	if err != nil {
-		return "", "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return "", "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("server returned %s", resp.Status)
-	}
-
-	var data struct {
-		BearerToken  string `json:"bearer_token"`
-		ReverbAppKey string `json:"reverb_app_key"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return "", "", err
-	}
-
-	return data.BearerToken, data.ReverbAppKey, nil
-}
-
-func checkSessionExists(serverURL, sessionName, token string) (bool, error) {
-	req, err := http.NewRequest("GET", serverURL+"/api/check-session/"+sessionName, nil)
-	if err != nil {
-		return false, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return false, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusNotFound {
-		return false, nil
-	}
-	if resp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("server returned %s", resp.Status)
-	}
-	return true, nil
-}
-
-type Game struct {
-	File string `json:"file"`
-}
-
-type Session struct {
-	ID    int    `json:"id"`
-	Name  string `json:"name"`
-	Games []Game `json:"games"`
-}
-
-func joinSession(serverURL, sessionName, token string) ([]string, error) {
-	req, err := http.NewRequest("POST", serverURL+"/api/join-session/"+sessionName, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("server returned %s", resp.Status)
-	}
-
-	var session Session
-	if err := json.NewDecoder(resp.Body).Decode(&session); err != nil {
-		return nil, err
-	}
-
-	var gameFiles []string
-	for _, g := range session.Games {
-		gameFiles = append(gameFiles, g.File)
-	}
-
-	return gameFiles, nil
-}
-
-func checkTokenExists(serverURL, token string) bool {
-	req, err := http.NewRequest("POST", serverURL+"/api/check-token", nil)
-	if err != nil {
-		log.Printf("checkTokenExists: failed to create request: %v", err)
-		return false
-	}
-
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/json")
-
-	maskedToken := "<empty>"
-	if len(token) > 8 {
-		maskedToken = token[:6] + "..."
-	} else if len(token) > 0 {
-		maskedToken = "..."
-	}
-	log.Printf(
-		"checkTokenExists: sending request: method=%s url=%s token=%s",
-		req.Method,
-		req.URL.String(),
-		maskedToken,
-	)
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		log.Printf("checkTokenExists: request failed: %v", err)
-		return false
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusNotFound {
-		log.Printf("checkTokenExists: token not found (404)")
-		return false
-	}
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("checkTokenExists: unexpected status code %d", resp.StatusCode)
-		return false
-	}
-
-	log.Printf("checkTokenExists: token is valid")
-	return true
 }

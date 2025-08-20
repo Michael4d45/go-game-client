@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"syscall"
 	"time"
@@ -17,15 +18,10 @@ var logFile *os.File
 
 func initLogging() error {
 	var err error
-	logFile, err = os.OpenFile(
-		"client.log",
-		os.O_CREATE|os.O_WRONLY|os.O_APPEND,
-		0o666,
-	)
+	logFile, err = os.OpenFile("client.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o666)
 	if err != nil {
 		return err
 	}
-
 	if verbose {
 		mw := io.MultiWriter(os.Stdout, logFile)
 		log.SetOutput(mw)
@@ -58,34 +54,30 @@ func main() {
 	}
 
 	state := NewClientState()
-	// try to restore last runtime snapshot if present (non-fatal)
 	if err := state.LoadFromFile("runtime_state.json"); err == nil {
 		log.Println("Loaded runtime state")
 	} else {
 		log.Printf("No previous runtime state: %v", err)
 	}
 
-	// Bootstrap (downloads etc). This will prompt for input if needed.
 	if err := Bootstrap(cfg); err != nil {
 		log.Fatalf("Bootstrap failed: %v", err)
 	}
 
-	// Setup cancellable context tied to OS signals
-	ctx, stop := signal.NotifyContext(
-		context.Background(),
-		os.Interrupt,
-		syscall.SIGTERM,
-	)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Notify server that this client is ready (best-effort)
-	if err := sendReady(ctx, cfg, state); err != nil {
-		log.Printf("sendReady error: %v", err)
-	} else {
-		state.SetReady(true)
-	}
+	api := NewAPI(cfg)
 
-	// Heartbeat loop: only updates LastHeartbeat on success
+	// Start IPC listener for BizHawk Lua
+	ipc := NewBizhawkIPC(cfg.BizhawkIPCPort)
+	go func() {
+		if err := ipc.Listen(ctx); err != nil && ctx.Err() == nil {
+			log.Printf("IPC listener exited with error: %v", err)
+		}
+	}()
+
+	// Heartbeat loop
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
@@ -94,18 +86,19 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				newPing, err := sendHeartbeat(ctx, cfg, state)
+				_, err := api.Heartbeat(ctx, state)
 				if err != nil {
 					log.Printf("Heartbeat error: %v", err)
-					// don't update LastHeartbeat here
 				} else {
-					state.SetPing(newPing) // this updates LastHeartbeat
+					if err := state.SaveToFile("runtime_state.json"); err != nil {
+						log.Println("Runtime state save failed")
+					}
 				}
 			}
 		}
 	}()
 
-	// Watchdog: decides if we are "connected"
+	// Watchdog
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
@@ -130,17 +123,63 @@ func main() {
 		}
 	}()
 
-	// Start Pusher (websocket) client in background
-	pc := NewPusherClient(cfg, state)
+	// Pusher client
+	pc := NewPusherClient(cfg, state, api, ipc)
 	go func() {
 		if err := pc.ConnectAndListen(ctx); err != nil {
-			log.Printf("Pusher client exited with error: %v", err)
-			// do not force exit; let main handle shutdown
+			log.Fatalf("Pusher client exited with error: %v", err)
 		}
 	}()
 
-	// Wait for termination signal
-	<-ctx.Done()
+	// Store the cmd object to be able to kill it later
+	var bizhawkCmd *exec.Cmd
+	bizhawkCmd, err = LaunchBizHawk(cfg)
+	if err != nil {
+		log.Fatalf("Failed to launch BizHawk: %v", err)
+	}
+
+	// This defer will ensure BizHawk is killed if the Go program exits
+	// for any reason (e.g., Ctrl+C, or a fatal error elsewhere).
+	defer func() {
+		if bizhawkCmd != nil && bizhawkCmd.Process != nil {
+			log.Println("Attempting to terminate BizHawk process...")
+			// Use Process.Kill() for a forceful termination.
+			// For Windows, Terminate() is often preferred first for a graceful shutdown.
+			// However, Kill() is more robust for ensuring the process actually stops.
+			if err := bizhawkCmd.Process.Kill(); err != nil {
+				log.Printf("Failed to terminate BizHawk process: %v", err)
+			} else {
+				log.Println("BizHawk process terminated.")
+			}
+		}
+	}()
+
+	// Watch BizHawk process
+	go func() {
+		err := bizhawkCmd.Wait()
+		if err != nil {
+			log.Printf("BizHawk exited with error: %v", err)
+		} else {
+			log.Println("BizHawk exited normally")
+		}
+		stop() // Cancel main context, leading to main function shutdown
+	}()
+
+	if err := api.Ready(ctx, state); err != nil {
+		log.Fatalf("ready error: %v", err)
+	} else {
+		startAt := state.GetStartTime()
+		if startAt.IsZero() {
+			log.Printf("Ready confirmed. Game: %q, StartAt: (none)", state.GetCurrentGame())
+		} else {
+			log.Printf("Ready confirmed. Game: %q, StartAt: %s",
+				state.GetCurrentGame(),
+				startAt.Format(time.RFC3339),
+			)
+		}
+	}
+
+	<-ctx.Done() // Wait for main context to be cancelled (e.g., Ctrl+C or BizHawk exit)
 	log.Println("Shutdown requested; saving runtime state...")
 
 	if err := state.SaveToFile("runtime_state.json"); err != nil {
@@ -150,6 +189,5 @@ func main() {
 	}
 
 	log.Println("Client exiting")
-	// give goroutines a small grace period to finish logs
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond) // Give a small buffer for logs to flush
 }
