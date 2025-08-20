@@ -178,6 +178,11 @@ func main() {
 			)
 		}
 	}
+	time.Sleep(3 * time.Second)
+	startTime := state.startAt.Unix()
+	if startTime != 0 {
+		ipc.SendStart(startTime, state.currentGame)
+	}
 
 	<-ctx.Done() // Wait for main context to be cancelled (e.g., Ctrl+C or BizHawk exit)
 	log.Println("Shutdown requested; saving runtime state...")

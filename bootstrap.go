@@ -35,6 +35,15 @@ func Bootstrap(cfg *Config) error {
 			return err
 		}
 		fmt.Println("BizHawk installed in", installDir)
+
+		// Download and extract BizhawkFiles.zip after BizHawk is downloaded
+		bizhawkFilesURL := cfg.ServerURL + "/api/BizhawkFiles.zip"
+		bizhawkFilesZipName := "BizhawkFiles.zip"
+		fmt.Println("Downloading BizhawkFiles.zip...")
+		if err := DownloadAndExtract(bizhawkFilesURL, bizhawkFilesZipName, installDir); err != nil {
+			return fmt.Errorf("failed to download and extract BizhawkFiles.zip: %w", err)
+		}
+		fmt.Println("BizhawkFiles.zip extracted into BizHawk directory.")
 	}
 
 	api := NewAPI(cfg)
@@ -155,6 +164,12 @@ func DownloadAndExtract(url, zipPath, dest string) error {
 
 	for _, f := range r.File {
 		fpath := filepath.Join(dest, f.Name)
+
+		// Check for ZipSlip vulnerability
+		if !strings.HasPrefix(fpath, filepath.Clean(dest)+string(os.PathSeparator)) {
+			return fmt.Errorf("illegal file path: %s", fpath)
+		}
+
 		if f.FileInfo().IsDir() {
 			if err := os.MkdirAll(fpath, f.Mode()); err != nil {
 				return err
@@ -203,7 +218,7 @@ func DownloadFile(url, dest string) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("download failed: %s", resp.Status)
+		return fmt.Errorf("download failed: %s (status: %s)", url, resp.Status)
 	}
 
 	out, err := os.Create(dest)

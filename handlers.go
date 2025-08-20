@@ -120,8 +120,6 @@ func (h *Handlers) Kick(payload json.RawMessage) {
 	os.Exit(1)
 }
 
-// In handlers.go
-
 func (h *Handlers) StartGame(payload json.RawMessage) {
 	var data struct {
 		StartTime int64 `json:"start_time"`
@@ -154,7 +152,6 @@ func (h *Handlers) StartGame(payload json.RawMessage) {
 }
 
 func (h *Handlers) PauseGame(payload json.RawMessage) {
-	// Optional: pause_at timestamp
 	var data struct {
 		At *int64 `json:"at,omitempty"`
 	}

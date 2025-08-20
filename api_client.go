@@ -296,6 +296,7 @@ func (a *API) JoinSession(ctx context.Context, sessionName string) ([]string, er
 		Name  string `json:"name"`
 		Games []struct {
 			File string `json:"file"`
+			ExtraFile *string `json:"extra_file"`
 		} `json:"games"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&session); err != nil {
@@ -304,6 +305,9 @@ func (a *API) JoinSession(ctx context.Context, sessionName string) ([]string, er
 	var files []string
 	for _, g := range session.Games {
 		files = append(files, g.File)
+		if g.ExtraFile != nil {
+			files = append(files, *g.ExtraFile)
+		}
 	}
 	return files, nil
 }
