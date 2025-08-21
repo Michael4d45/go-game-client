@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -96,14 +97,14 @@ func (h *Handlers) DownloadLua(payload json.RawMessage) {
 
 func (h *Handlers) ServerMessage(payload json.RawMessage) {
 	var data struct {
-		Message string `json:"message"`
+		Text string `json:"text"`
 	}
 	if err := json.Unmarshal(payload, &data); err != nil {
 		log.Printf("handleServerMessage: bad payload: %v", err)
 		return
 	}
-	log.Printf("[SERVER MESSAGE] %s", data.Message)
-	h.ipc.SendMessage(data.Message)
+	log.Printf("[SERVER MESSAGE] %s", data.Text)
+	h.ipc.SendMessage(data.Text)
 }
 
 func (h *Handlers) Kick(payload json.RawMessage) {
@@ -188,6 +189,30 @@ func (h *Handlers) PrepareSwap(payload json.RawMessage) {
 	log.Printf("Prepare swap: saving state to %s", data.SavePath)
 }
 
+func (h *Handlers) ClearSaves(_payload json.RawMessage) {
+	saveDir := h.cfg.SaveDir
+
+	// Read all entries in the directory
+	entries, err := os.ReadDir(saveDir)
+	if err != nil {
+		fmt.Printf("Error reading directory: %v\n", err)
+		return
+	}
+
+	for _, entry := range entries {
+		// Build full path
+		path := filepath.Join(saveDir, entry.Name())
+
+		// Remove file or directory recursively
+		err := os.RemoveAll(path)
+		if err != nil {
+			fmt.Printf("Error deleting %s: %v\n", path, err)
+		}
+	}
+
+	fmt.Println("All saves cleared.")
+}
+
 type WSMessage struct {
 	Type    string          `json:"type"`
 	Payload json.RawMessage `json:"payload"`
@@ -228,6 +253,8 @@ func (h *Handlers) handleRawEvent(raw json.RawMessage) {
 		h.SessionEnded(msg.Payload)
 	case "prepare_swap":
 		h.PrepareSwap(msg.Payload)
+	case "clear_saves":
+		h.ClearSaves(msg.Payload)
 	default:
 		log.Printf("[WARN] Unknown event type: %s", msg.Type)
 	}
