@@ -123,8 +123,10 @@ func main() {
 		}
 	}()
 
+	handlers := NewHandlers(api, cfg, state, ipc)
+
 	// Pusher client
-	pc := NewPusherClient(cfg, state, api, ipc)
+	pc := NewPusherClient(cfg, state, handlers)
 	go func() {
 		if err := pc.ConnectAndListen(ctx); err != nil {
 			log.Fatalf("Pusher client exited with error: %v", err)
@@ -176,13 +178,12 @@ func main() {
 				state.GetCurrentGame(),
 				startAt.Format(time.RFC3339),
 			)
+			time.Sleep(3 * time.Second)
+			handlers.SendStart()
 		}
 	}
-	time.Sleep(3 * time.Second)
-	startTime := state.startAt.Unix()
-	if startTime != 0 {
-		ipc.SendStart(startTime, state.currentGame)
-	}
+
+	ipc.SendMessage("Welcome")
 
 	<-ctx.Done() // Wait for main context to be cancelled (e.g., Ctrl+C or BizHawk exit)
 	log.Println("Shutdown requested; saving runtime state...")

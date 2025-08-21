@@ -133,22 +133,25 @@ func (h *Handlers) StartGame(payload json.RawMessage) {
 		return
 	}
 
-	gameName := h.state.GetCurrentGame()
-	if gameName == "" {
-		log.Printf("handleStartGame: no current game set in state")
-		return
-	}
-
 	startTime := time.Unix(data.StartTime, 0)
-	log.Printf("Scheduled START for game %q at %s (%d)",
-		gameName,
+	log.Printf("Scheduled START at %s (%d)",
 		startTime.Format(time.RFC3339),
 		data.StartTime,
 	)
 
 	h.state.SetStartTime(startTime)
 
-	h.ipc.SendStart(data.StartTime, gameName)
+	h.SendStart()
+}
+
+func (h *Handlers) SendStart() {
+	gameName := h.state.GetCurrentGame()
+	if gameName == "" {
+		log.Printf("handleStartGame: no current game set in state")
+		return
+	}
+
+	h.ipc.SendStart(h.state.startAt.Unix(), gameName)
 }
 
 func (h *Handlers) PauseGame(payload json.RawMessage) {

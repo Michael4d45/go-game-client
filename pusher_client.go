@@ -17,11 +17,11 @@ type PusherClient struct {
 	handlers *Handlers
 }
 
-func NewPusherClient(cfg *Config, state *ClientState, api *API, ipc *BizhawkIPC) *PusherClient {
+func NewPusherClient(cfg *Config, state *ClientState, handlers *Handlers) *PusherClient {
 	return &PusherClient{
 		cfg:      cfg,
 		state:    state,
-		handlers: NewHandlers(api, cfg, state, ipc),
+		handlers: handlers,
 	}
 }
 
