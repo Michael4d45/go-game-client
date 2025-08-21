@@ -14,76 +14,126 @@ import (
 	"sync"
 )
 
+// Bootstrap handles the initial setup, including downloading assets,
+// registering the player, and joining a session.
 func Bootstrap(cfg *Config) error {
-	if err := os.MkdirAll(cfg.RomDir, 0o755); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(cfg.SaveDir, 0o755); err != nil {
-		return err
-	}
-	if err := os.MkdirAll("scripts", 0o755); err != nil {
-		return err
+	if err := createDirectories(cfg); err != nil {
+		return fmt.Errorf("failed to create directories: %w", err)
 	}
 
+	if err := ensureBizHawkInstalled(cfg); err != nil {
+		return fmt.Errorf("BizHawk installation check failed: %w", err)
+	}
+
+	api := NewAPI(cfg)
+	ctx := context.Background()
+
+	if err := ensurePlayerRegistered(ctx, cfg, api); err != nil {
+		return fmt.Errorf("player registration failed: %w", err)
+	}
+	// The bearer token might have been updated, so create a new API client.
+	api = NewAPI(cfg)
+
+	if err := ensureSessionJoined(ctx, cfg, api); err != nil {
+		return fmt.Errorf("session join failed: %w", err)
+	}
+
+	games, err := api.JoinSession(ctx, cfg.SessionName)
+	if err != nil {
+		return fmt.Errorf("failed to get game list from session: %w", err)
+	}
+
+	if err := downloadMissingGames(cfg, games); err != nil {
+		return fmt.Errorf("failed to download games: %w", err)
+	}
+
+	if err := downloadLatestLuaScript(cfg); err != nil {
+		return fmt.Errorf("failed to download lua script: %w", err)
+	}
+
+	return SaveConfig(cfg, "config.json")
+}
+
+func createDirectories(cfg *Config) error {
+	dirs := []string{cfg.RomDir, cfg.SaveDir, "scripts"}
+	for _, dir := range dirs {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureBizHawkInstalled(cfg *Config) error {
 	zipFileName := filepath.Base(cfg.BizHawkDownloadURL)
 	installDir := strings.TrimSuffix(zipFileName, filepath.Ext(zipFileName))
 	cfg.BizHawkPath = filepath.Join(installDir, "EmuHawk.exe")
 
 	if _, err := os.Stat(cfg.BizHawkPath); os.IsNotExist(err) {
 		fmt.Println("BizHawk not found. Downloading...")
-		if err := DownloadAndExtract(cfg.BizHawkDownloadURL, zipFileName, installDir); err != nil {
+		if err := DownloadAndExtract(
+			httpClient,
+			cfg.BizHawkDownloadURL,
+			zipFileName,
+			installDir,
+		); err != nil {
 			return err
 		}
 		fmt.Println("BizHawk installed in", installDir)
 
-		// Download and extract BizhawkFiles.zip after BizHawk is downloaded
 		bizhawkFilesURL := cfg.ServerURL + "/api/BizhawkFiles.zip"
-		bizhawkFilesZipName := "BizhawkFiles.zip"
 		fmt.Println("Downloading BizhawkFiles.zip...")
-		if err := DownloadAndExtract(bizhawkFilesURL, bizhawkFilesZipName, installDir); err != nil {
-			return fmt.Errorf("failed to download and extract BizhawkFiles.zip: %w", err)
+		if err := DownloadAndExtract(
+			httpClient,
+			bizhawkFilesURL,
+			"BizhawkFiles.zip",
+			installDir,
+		); err != nil {
+			return fmt.Errorf(
+				"failed to download and extract BizhawkFiles.zip: %w",
+				err,
+			)
 		}
 		fmt.Println("BizhawkFiles.zip extracted into BizHawk directory.")
 	}
+	return nil
+}
 
-	api := NewAPI(cfg)
+func ensurePlayerRegistered(ctx context.Context, cfg *Config, api *API) error {
 	reader := bufio.NewReader(os.Stdin)
-	ctx := context.Background()
-
-	// --- Player registration / token check ---
 	for {
-		if cfg.PlayerName == "" || cfg.BearerToken == "" || cfg.AppKey == "" {
-			fmt.Print("Enter your desired player ID: ")
-			playerName, _ := reader.ReadString('\n')
-			cfg.PlayerName = strings.TrimSpace(playerName)
-
-			token, appKey, err := api.RegisterPlayer(ctx, cfg.PlayerName)
+		if cfg.BearerToken != "" {
+			ok, err := api.CheckTokenExists(ctx, cfg.BearerToken)
 			if err != nil {
-				log.Printf("registerPlayer failed: %v", err)
-				fmt.Println("failed to register player")
-				continue
+				log.Printf("Token check failed, re-registering: %v", err)
+				cfg.BearerToken, cfg.AppKey = "", ""
+				continue // Retry
 			}
-			cfg.BearerToken = token
-			cfg.AppKey = appKey
-			api = NewAPI(cfg) // refresh API with new bearer
-			break
+			if ok {
+				return nil // Token is valid
+			}
+			log.Println("Bearer token is invalid, re-registering.")
+			cfg.BearerToken, cfg.AppKey = "", ""
 		}
 
-		ok, err := api.CheckTokenExists(ctx, cfg.BearerToken)
+		fmt.Print("Enter your desired player ID: ")
+		playerName, _ := reader.ReadString('\n')
+		cfg.PlayerName = strings.TrimSpace(playerName)
+
+		token, appKey, err := api.RegisterPlayer(ctx, cfg.PlayerName)
 		if err != nil {
-			log.Printf("check token failed: %v", err)
-			cfg.BearerToken = ""
-			cfg.AppKey = ""
+			log.Printf("RegisterPlayer failed: %v", err)
+			fmt.Println("Failed to register player. Please try again.")
 			continue
 		}
-		if ok {
-			break
-		}
-		cfg.BearerToken = ""
-		cfg.AppKey = ""
+		cfg.BearerToken = token
+		cfg.AppKey = appKey
+		return nil
 	}
+}
 
-	// --- Session join ---
+func ensureSessionJoined(ctx context.Context, cfg *Config, api *API) error {
+	reader := bufio.NewReader(os.Stdin)
 	for {
 		if cfg.SessionName != "" {
 			exists, err := api.CheckSessionExists(ctx, cfg.SessionName)
@@ -91,8 +141,9 @@ func Bootstrap(cfg *Config) error {
 				return err
 			}
 			if exists {
-				break
+				return nil // Session exists
 			}
+			log.Printf("Session '%s' not found.", cfg.SessionName)
 			cfg.SessionName = ""
 		}
 
@@ -100,31 +151,27 @@ func Bootstrap(cfg *Config) error {
 		sessionName, _ := reader.ReadString('\n')
 		cfg.SessionName = strings.TrimSpace(sessionName)
 	}
+}
 
-	games, err := api.JoinSession(ctx, cfg.SessionName)
-	if err != nil {
-		return err
-	}
-
-	// --- Download missing games ---
+func downloadMissingGames(cfg *Config, games []string) error {
 	var wg sync.WaitGroup
 	errCh := make(chan error, len(games))
 
 	for _, g := range games {
 		localPath := filepath.Join(cfg.RomDir, g)
-
 		if _, err := os.Stat(localPath); err == nil {
-			fmt.Println("Game already exists:", g)
+			log.Println("Game already exists:", g)
 			continue
 		}
 
 		wg.Add(1)
 		go func(gameFile, dest string) {
 			defer wg.Done()
-			fmt.Println("Downloading:", gameFile)
+			log.Println("Downloading:", gameFile)
 			romURL := cfg.ServerURL + "/api/roms/" + gameFile
-			if err := DownloadFile(romURL, dest); err != nil {
-				log.Printf("Failed to download %s: %v", gameFile, err)
+			if err := DownloadFile(httpClient, romURL, dest); err != nil {
+				err := fmt.Errorf("failed to download %s: %w", gameFile, err)
+				log.Print(err)
 				errCh <- err
 			}
 		}(g, localPath)
@@ -132,26 +179,33 @@ func Bootstrap(cfg *Config) error {
 
 	wg.Wait()
 	close(errCh)
-	for e := range errCh {
-		if e != nil {
-			return e
+
+	// Return the first error encountered, if any.
+	for err := range errCh {
+		if err != nil {
+			return err
 		}
 	}
+	return nil
+}
 
-	// --- Download latest Lua script ---
+func downloadLatestLuaScript(cfg *Config) error {
 	luaURL := cfg.ServerURL + "/api/scripts/latest"
 	luaDest := filepath.Join("scripts", "swap_latest.lua")
-	if err := DownloadFile(luaURL, luaDest); err != nil {
+	if err := DownloadFile(httpClient, luaURL, luaDest); err != nil {
 		return err
 	}
 	cfg.LuaScript = luaDest
-
-	// Save updated config
-	return SaveConfig(cfg, "config.json")
+	return nil
 }
 
-func DownloadAndExtract(url, zipPath, dest string) error {
-	if err := DownloadFile(url, zipPath); err != nil {
+func DownloadAndExtract(
+	client *http.Client,
+	url,
+	zipPath,
+	dest string,
+) error {
+	if err := DownloadFile(client, url, zipPath); err != nil {
 		return err
 	}
 	defer os.Remove(zipPath)
@@ -164,9 +218,10 @@ func DownloadAndExtract(url, zipPath, dest string) error {
 
 	for _, f := range r.File {
 		fpath := filepath.Join(dest, f.Name)
-
-		// Check for ZipSlip vulnerability
-		if !strings.HasPrefix(fpath, filepath.Clean(dest)+string(os.PathSeparator)) {
+		if !strings.HasPrefix(
+			fpath,
+			filepath.Clean(dest)+string(os.PathSeparator),
+		) {
 			return fmt.Errorf("illegal file path: %s", fpath)
 		}
 
@@ -176,6 +231,7 @@ func DownloadAndExtract(url, zipPath, dest string) error {
 			}
 			continue
 		}
+
 		if err := os.MkdirAll(filepath.Dir(fpath), 0o755); err != nil {
 			return err
 		}
@@ -187,11 +243,13 @@ func DownloadAndExtract(url, zipPath, dest string) error {
 		if err != nil {
 			return err
 		}
+
 		rc, err := f.Open()
 		if err != nil {
 			outFile.Close()
 			return err
 		}
+
 		_, err = io.Copy(outFile, rc)
 		outFile.Close()
 		rc.Close()
@@ -202,16 +260,14 @@ func DownloadAndExtract(url, zipPath, dest string) error {
 	return nil
 }
 
-// DownloadFile streams the URL to dest (overwrites dest).
-func DownloadFile(url, dest string) error {
+// DownloadFile streams the URL to dest.
+func DownloadFile(client *http.Client, url, dest string) error {
 	log.Printf("DownloadFile: %s -> %s", url, dest)
-
-	// ensure parent dir exists
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
 	}
 
-	resp, err := httpClient.Get(url)
+	resp, err := client.Get(url)
 	if err != nil {
 		return err
 	}

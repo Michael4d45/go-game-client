@@ -3,13 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"time"
 )
 
+// Handlers contains methods for processing events received from the server.
 type Handlers struct {
 	api   *API
 	cfg   *Config
@@ -17,7 +17,12 @@ type Handlers struct {
 	ipc   *BizhawkIPC
 }
 
-func NewHandlers(api *API, cfg *Config, state *ClientState, ipc *BizhawkIPC) *Handlers {
+func NewHandlers(
+	api *API,
+	cfg *Config,
+	state *ClientState,
+	ipc *BizhawkIPC,
+) *Handlers {
 	return &Handlers{
 		api:   api,
 		cfg:   cfg,
@@ -28,10 +33,9 @@ func NewHandlers(api *API, cfg *Config, state *ClientState, ipc *BizhawkIPC) *Ha
 
 func (h *Handlers) Swap(payload json.RawMessage) {
 	var data struct {
-		RoundNumber int     `json:"round_number"`
-		SwapTime    int64   `json:"swap_at"`
-		GameName    string  `json:"new_game"`
-		SaveURL     *string `json:"save_url"`
+		RoundNumber int    `json:"round_number"`
+		SwapTime    int64  `json:"swap_at"`
+		GameName    string `json:"new_game"`
 	}
 	if err := json.Unmarshal(payload, &data); err != nil {
 		log.Printf("handleSwap: bad payload: %v", err)
@@ -42,17 +46,14 @@ func (h *Handlers) Swap(payload json.RawMessage) {
 		return
 	}
 
-	// Notify BizHawk to swap at the timestamp
 	h.ipc.SendSwap(data.SwapTime, data.GameName)
 	h.state.SetCurrentGame(data.GameName)
 	log.Printf("Swap scheduled for game %s at %d", data.GameName, data.SwapTime)
 
-	// Notify server at/after swap time
 	go func(round int, at int64) {
 		swapAt := time.Unix(at, 0)
-		if dur := time.Until(swapAt); dur > 0 {
-			time.Sleep(dur)
-		}
+		time.Sleep(time.Until(swapAt))
+
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := h.api.SwapComplete(ctx, round); err != nil {
@@ -71,7 +72,7 @@ func (h *Handlers) DownloadROM(payload json.RawMessage) {
 	}
 	dest := filepath.Join(h.cfg.RomDir, data.File)
 	url := h.cfg.ServerURL + "/api/roms/" + data.File
-	if err := DownloadFile(url, dest); err != nil {
+	if err := DownloadFile(httpClient, url, dest); err != nil {
 		log.Printf("handleDownloadROM: download failed: %v", err)
 	} else {
 		log.Printf("Downloaded ROM: %s", data.File)
@@ -88,7 +89,7 @@ func (h *Handlers) DownloadLua(payload json.RawMessage) {
 	}
 	dest := filepath.Join("scripts", data.Filename)
 	url := h.cfg.ServerURL + "/api/scripts/latest"
-	if err := DownloadFile(url, dest); err != nil {
+	if err := DownloadFile(httpClient, url, dest); err != nil {
 		log.Printf("handleDownloadLua: download failed: %v", err)
 	} else {
 		log.Printf("Downloaded Lua script: %s", data.Filename)
@@ -108,16 +109,14 @@ func (h *Handlers) ServerMessage(payload json.RawMessage) {
 }
 
 func (h *Handlers) Kick(payload json.RawMessage) {
-	type kick struct {
+	var data struct {
 		Reason string `json:"reason"`
 	}
-	var data kick
 	_ = json.Unmarshal(payload, &data)
 	log.Printf("[KICKED] Reason: %s", data.Reason)
-	// Propagate to BizHawk as message and pause
+
 	h.ipc.SendMessage("Kicked: " + data.Reason)
 	h.ipc.SendPause(nil)
-	// Exit process
 	os.Exit(1)
 }
 
@@ -135,24 +134,23 @@ func (h *Handlers) StartGame(payload json.RawMessage) {
 	}
 
 	startTime := time.Unix(data.StartTime, 0)
-	log.Printf("Scheduled START at %s (%d)",
+	log.Printf(
+		"Scheduled START at %s (%d)",
 		startTime.Format(time.RFC3339),
 		data.StartTime,
 	)
 
 	h.state.SetStartTime(startTime)
-
 	h.SendStart()
 }
 
 func (h *Handlers) SendStart() {
 	gameName := h.state.GetCurrentGame()
 	if gameName == "" {
-		log.Printf("handleStartGame: no current game set in state")
+		log.Printf("SendStart: no current game set in state")
 		return
 	}
-
-	h.ipc.SendStart(h.state.startAt.Unix(), gameName)
+	h.ipc.SendStart(h.state.GetStartTime().Unix(), gameName)
 }
 
 func (h *Handlers) PauseGame(payload json.RawMessage) {
@@ -191,26 +189,19 @@ func (h *Handlers) PrepareSwap(payload json.RawMessage) {
 
 func (h *Handlers) ClearSaves(_payload json.RawMessage) {
 	saveDir := h.cfg.SaveDir
-
-	// Read all entries in the directory
 	entries, err := os.ReadDir(saveDir)
 	if err != nil {
-		fmt.Printf("Error reading directory: %v\n", err)
+		log.Printf("Error reading save directory '%s': %v", saveDir, err)
 		return
 	}
 
 	for _, entry := range entries {
-		// Build full path
 		path := filepath.Join(saveDir, entry.Name())
-
-		// Remove file or directory recursively
-		err := os.RemoveAll(path)
-		if err != nil {
-			fmt.Printf("Error deleting %s: %v\n", path, err)
+		if err := os.RemoveAll(path); err != nil {
+			log.Printf("Error deleting %s: %v", path, err)
 		}
 	}
-
-	fmt.Println("All saves cleared.")
+	log.Println("All saves cleared.")
 }
 
 type WSMessage struct {
@@ -219,17 +210,17 @@ type WSMessage struct {
 }
 
 func (h *Handlers) handleRawEvent(raw json.RawMessage) {
-	log.Printf("[DEBUG] Raw event from Pusher: %s", string(raw))
-
-	var inner string
-	if err := json.Unmarshal(raw, &inner); err != nil {
-		log.Printf("[ERROR] Unmarshal outer event: %v", err)
+	// The pusher library wraps the event data in a JSON string,
+	// so we need to unmarshal it twice. First to get the string,
+	// then to get the actual message object.
+	var eventData string
+	if err := json.Unmarshal(raw, &eventData); err != nil {
+		log.Printf("[ERROR] Unmarshal outer Pusher event: %v", err)
 		return
 	}
-	log.Printf("[DEBUG] Outer JSON string: %s", inner)
 
 	var msg WSMessage
-	if err := json.Unmarshal([]byte(inner), &msg); err != nil {
+	if err := json.Unmarshal([]byte(eventData), &msg); err != nil {
 		log.Printf("[ERROR] Unmarshal inner WSMessage: %v", err)
 		return
 	}
