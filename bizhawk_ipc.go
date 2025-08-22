@@ -1,27 +1,45 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
 
-type BizhawkIPC struct {
-	addr   string
-	mu     sync.RWMutex // protects conn
-	wmu    sync.Mutex   // serializes writes
-	conn   net.Conn
-	closed chan struct{}
+type pendingCmd struct {
+	line     string
+	ch       chan string
+	retries  int
+	lastSent time.Time
 }
 
-func NewBizhawkIPC(port int) *BizhawkIPC {
+type BizhawkIPC struct {
+	addr   string
+	mu     sync.RWMutex
+	wmu    sync.Mutex
+	conn   net.Conn
+	closed chan struct{}
+
+	cmdMu   sync.Mutex
+	nextID  int
+	pending map[int]*pendingCmd
+
+	state *ClientState
+}
+
+func NewBizhawkIPC(port int, state *ClientState) *BizhawkIPC {
 	return &BizhawkIPC{
-		addr:   fmt.Sprintf("127.0.0.1:%d", port),
-		closed: make(chan struct{}),
+		addr:    fmt.Sprintf("127.0.0.1:%d", port),
+		closed:  make(chan struct{}),
+		pending: make(map[int]*pendingCmd),
+		state:   state,
 	}
 }
 
@@ -42,6 +60,9 @@ func (b *BizhawkIPC) Listen(ctx context.Context) error {
 		b.mu.Unlock()
 		close(b.closed)
 	}()
+
+	// Start resend loop
+	go b.startResender(ctx)
 
 	for {
 		ln.(*net.TCPListener).SetDeadline(time.Now().Add(1 * time.Second))
@@ -66,35 +87,22 @@ func (b *BizhawkIPC) Listen(ctx context.Context) error {
 		b.conn = c
 		b.mu.Unlock()
 
-		// Background reader just to detect close
+		// Background reader
 		go func(conn net.Conn) {
-			buf := make([]byte, 1)
-			for {
-				conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-				_, err := conn.Read(buf)
-				if err != nil {
-					if err == io.EOF {
-						log.Printf("[IPC] connection closed by peer")
-					} else if ne, ok := err.(net.Error); ok && ne.Timeout() {
-						// keepalive via timeouts
-						select {
-						case <-ctx.Done():
-							return
-						default:
-						}
-						continue
-					} else {
-						log.Printf("[IPC] read error: %v", err)
-					}
-					b.mu.Lock()
-					if b.conn == conn {
-						_ = b.conn.Close()
-						b.conn = nil
-					}
-					b.mu.Unlock()
-					return
-				}
+			scanner := bufio.NewScanner(conn)
+			for scanner.Scan() {
+				line := scanner.Text()
+				b.handleResponse(line)
 			}
+			if err := scanner.Err(); err != nil && err != io.EOF {
+				log.Printf("[IPC] read error: %v", err)
+			}
+			b.mu.Lock()
+			if b.conn == conn {
+				_ = b.conn.Close()
+				b.conn = nil
+			}
+			b.mu.Unlock()
 		}(c)
 	}
 }
@@ -116,42 +124,150 @@ func (b *BizhawkIPC) SendLine(line string) error {
 	return nil
 }
 
+// SendCommand sends a command with retries and waits for ACK/NACK.
+func (b *BizhawkIPC) SendCommand(parts ...string) error {
+	b.cmdMu.Lock()
+	id := b.nextID
+	b.nextID++
+	ch := make(chan string, 1)
+	line := fmt.Sprintf("CMD|%d|%s", id, strings.Join(parts, "|"))
+	cmd := &pendingCmd{
+		line:     line,
+		ch:       ch,
+		retries:  3,
+		lastSent: time.Now(),
+	}
+	b.pending[id] = cmd
+	b.cmdMu.Unlock()
+
+	if err := b.SendLine(line); err != nil {
+		return err
+	}
+
+	select {
+	case resp := <-ch:
+		if strings.HasPrefix(resp, "ACK") {
+			return nil
+		}
+		return fmt.Errorf("command %d failed: %s", id, resp)
+	case <-time.After(5 * time.Second):
+		return fmt.Errorf("command %d timeout", id)
+	}
+}
+
+func (b *BizhawkIPC) handleResponse(line string) {
+	parts := strings.SplitN(line, "|", 3)
+	if len(parts) < 1 {
+		return
+	}
+	switch parts[0] {
+	case "ACK", "NACK":
+		if len(parts) < 2 {
+			return
+		}
+		id, _ := strconv.Atoi(parts[1])
+		b.cmdMu.Lock()
+		if cmd, ok := b.pending[id]; ok {
+			delete(b.pending, id)
+			cmd.ch <- parts[0]
+		}
+		b.cmdMu.Unlock()
+	case "PING":
+		if len(parts) >= 2 {
+			_ = b.SendLine("PONG|" + parts[1])
+		}
+	case "HELLO":
+		// Lua restarted, send SYNC
+		go func() {
+			if err := b.SendSync(b.state); err != nil {
+				log.Printf("[IPC] Failed to send SYNC: %v", err)
+			} else {
+				log.Printf("[IPC] Sent SYNC to BizHawk")
+			}
+		}()
+	}
+}
+
+func (b *BizhawkIPC) startResender(ctx context.Context) {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			now := time.Now()
+			b.cmdMu.Lock()
+			for id, cmd := range b.pending {
+				if now.Sub(cmd.lastSent) > 1*time.Second {
+					if cmd.retries > 0 {
+						log.Printf("[IPC] Resending command %d: %s", id, cmd.line)
+						_ = b.SendLine(cmd.line)
+						cmd.lastSent = now
+						cmd.retries--
+					} else {
+						log.Printf("[IPC] Command %d failed after retries", id)
+						delete(b.pending, id)
+						cmd.ch <- "NACK|timeout"
+					}
+				}
+			}
+			b.cmdMu.Unlock()
+		}
+	}
+}
+
+// SendSync sends the current state to Lua after HELLO.
+func (b *BizhawkIPC) SendSync(state *ClientState) error {
+	game := state.GetCurrentGame()
+	paused := 0
+	if !state.Snapshot().Ready {
+		paused = 1
+	}
+	startAt := state.GetStartTime().Unix()
+	return b.SendCommand("SYNC", game, fmt.Sprintf("%d", paused), fmt.Sprintf("%d", startAt))
+}
+
 // Convenience helpers
 func (b *BizhawkIPC) SendSwap(at int64, game string) {
-	if err := b.SendLine(fmt.Sprintf("SWAP|%d|%s", at, game)); err != nil {
+	if err := b.SendCommand("SWAP", fmt.Sprintf("%d", at), game); err != nil {
 		log.Printf("[IPC] SWAP send failed: %v", err)
 	}
 }
 func (b *BizhawkIPC) SendStart(at int64, game string) {
-	if err := b.SendLine(fmt.Sprintf("START|%d|%s", at, game)); err != nil {
+	if err := b.SendCommand("START", fmt.Sprintf("%d", at), game); err != nil {
 		log.Printf("[IPC] START send failed: %v", err)
 	}
 }
 func (b *BizhawkIPC) SendSave(path string) {
-	if err := b.SendLine(fmt.Sprintf("SAVE|%s", path)); err != nil {
+	if err := b.SendCommand("SAVE", path); err != nil {
 		log.Printf("[IPC] SAVE send failed: %v", err)
 	}
 }
 func (b *BizhawkIPC) SendPause(at *int64) {
-	line := "PAUSE"
 	if at != nil {
-		line = fmt.Sprintf("PAUSE|%d", *at)
-	}
-	if err := b.SendLine(line); err != nil {
-		log.Printf("[IPC] PAUSE send failed: %v", err)
+		if err := b.SendCommand("PAUSE", fmt.Sprintf("%d", *at)); err != nil {
+			log.Printf("[IPC] PAUSE send failed: %v", err)
+		}
+	} else {
+		if err := b.SendCommand("PAUSE"); err != nil {
+			log.Printf("[IPC] PAUSE send failed: %v", err)
+		}
 	}
 }
 func (b *BizhawkIPC) SendResume(at *int64) {
-	line := "RESUME"
 	if at != nil {
-		line = fmt.Sprintf("RESUME|%d", *at)
-	}
-	if err := b.SendLine(line); err != nil {
-		log.Printf("[IPC] RESUME send failed: %v", err)
+		if err := b.SendCommand("RESUME", fmt.Sprintf("%d", *at)); err != nil {
+			log.Printf("[IPC] RESUME send failed: %v", err)
+		}
+	} else {
+		if err := b.SendCommand("RESUME"); err != nil {
+			log.Printf("[IPC] RESUME send failed: %v", err)
+		}
 	}
 }
 func (b *BizhawkIPC) SendMessage(msg string) {
-	if err := b.SendLine(fmt.Sprintf("MSG|%s", msg)); err != nil {
+	if err := b.SendCommand("MSG", msg); err != nil {
 		log.Printf("[IPC] MSG send failed: %v", err)
 	}
 }

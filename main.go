@@ -71,16 +71,31 @@ func (a *App) Run() error {
 	defer stop()
 
 	a.api = NewAPI(a.cfg)
-	a.ipc = NewBizhawkIPC(a.cfg.BizhawkIPCPort)
+
+	// Start IPC listener for BizHawk Lua (now requires state for SYNC)
+	a.ipc = NewBizhawkIPC(a.cfg.BizhawkIPCPort, a.state)
+	go func() {
+		if err := a.ipc.Listen(ctx); err != nil && ctx.Err() == nil {
+			log.Printf("IPC listener exited with error: %v", err)
+		}
+	}()
+
+	// Heartbeat loop
+	go a.startHeartbeatLoop(ctx)
+
+	// Watchdog
+	go a.startWatchdog(ctx)
+
+	// Handlers and Pusher
 	a.handlers = NewHandlers(a.api, a.cfg, a.state, a.ipc)
 	a.pusher = NewPusherClient(a.cfg, a.state, a.handlers)
+	go func() {
+		if err := a.pusher.ConnectAndListen(ctx); err != nil && ctx.Err() == nil {
+			log.Fatalf("Pusher client exited with error: %v", err)
+		}
+	}()
 
-	// Start background services
-	go a.startIPCListener(ctx)
-	go a.startHeartbeatLoop(ctx)
-	go a.startWatchdog(ctx)
-	go a.startPusherClient(ctx)
-
+	// Launch BizHawk
 	var err error
 	a.bizhawkCmd, err = LaunchBizHawk(a.cfg)
 	if err != nil {
@@ -96,9 +111,7 @@ func (a *App) Run() error {
 
 	a.ipc.SendMessage("Welcome")
 
-	// Wait for shutdown signal
 	<-ctx.Done()
-
 	return a.Shutdown()
 }
 
@@ -128,12 +141,6 @@ func (a *App) Shutdown() error {
 	}
 	time.Sleep(200 * time.Millisecond) // Allow logs to flush
 	return nil
-}
-
-func (a *App) startIPCListener(ctx context.Context) {
-	if err := a.ipc.Listen(ctx); err != nil && ctx.Err() == nil {
-		log.Printf("IPC listener exited with error: %v", err)
-	}
 }
 
 func (a *App) startHeartbeatLoop(ctx context.Context) {
@@ -176,12 +183,6 @@ func (a *App) startWatchdog(ctx context.Context) {
 				}
 			}
 		}
-	}
-}
-
-func (a *App) startPusherClient(ctx context.Context) {
-	if err := a.pusher.ConnectAndListen(ctx); err != nil && ctx.Err() == nil {
-		log.Printf("Pusher client exited with error: %v", err)
 	}
 }
 
