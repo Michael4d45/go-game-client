@@ -107,7 +107,7 @@ func (a *App) Run() error {
 	if err := a.api.Ready(ctx, a.state); err != nil {
 		return fmt.Errorf("ready error: %w", err)
 	}
-	a.handleInitialStartState()
+	a.ipc.SendSync()
 
 	a.ipc.SendMessage("Welcome")
 
@@ -193,23 +193,6 @@ func (a *App) watchBizHawkProcess(stop context.CancelFunc) {
 		log.Println("BizHawk exited normally")
 	}
 	stop() // Trigger application shutdown
-}
-
-func (a *App) handleInitialStartState() {
-	startAt := a.state.GetStartTime()
-	game := a.state.GetCurrentGame()
-	if startAt.IsZero() {
-		log.Printf("Ready confirmed. Game: %q, StartAt: (not set)", game)
-	} else {
-		log.Printf(
-			"Ready confirmed. Game: %q, StartAt: %s",
-			game,
-			startAt.Format(time.RFC3339),
-		)
-		// Give BizHawk a moment to load before sending the start command
-		time.Sleep(3 * time.Second)
-		a.handlers.SendStart()
-	}
 }
 
 func initLogging() (*os.File, error) {

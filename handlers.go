@@ -50,16 +50,13 @@ func (h *Handlers) Swap(payload json.RawMessage) {
 	h.state.SetCurrentGame(data.GameName)
 	log.Printf("Swap scheduled for game %s at %d", data.GameName, data.SwapTime)
 
-	go func(round int, at int64) {
-		swapAt := time.Unix(at, 0)
-		time.Sleep(time.Until(swapAt))
-
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	go func(round int) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := h.api.SwapComplete(ctx, round); err != nil {
 			log.Printf("swap-complete error: %v", err)
 		}
-	}(data.RoundNumber, data.SwapTime)
+	}(data.RoundNumber)
 }
 
 func (h *Handlers) DownloadROM(payload json.RawMessage) {
@@ -120,46 +117,30 @@ func (h *Handlers) Kick(payload json.RawMessage) {
 	os.Exit(1)
 }
 
-func (h *Handlers) StartGame(payload json.RawMessage) {
+func (h *Handlers) ChnageGameState(payload json.RawMessage) {
 	var data struct {
-		StartTime int64 `json:"start_time"`
+		State   string `json:"state"`
+		StateAt int64  `json:"state_at"`
 	}
 	if err := json.Unmarshal(payload, &data); err != nil {
-		log.Printf("handleStartGame: bad payload: %v", err)
+		log.Printf("handleChnageGameState: bad payload: %v", err)
 		return
 	}
-	if data.StartTime == 0 {
-		log.Printf("handleStartGame: missing or zero start_time")
+	if data.StateAt == 0 {
+		log.Printf("handleChnageGameState: missing or zero start_time")
 		return
 	}
 
-	startTime := time.Unix(data.StartTime, 0)
+	stateTime := time.Unix(data.StateAt, 0)
 	log.Printf(
-		"Scheduled START at %s (%d)",
-		startTime.Format(time.RFC3339),
-		data.StartTime,
+		"Scheduled %s at %s (%d)",
+		data.State,
+		stateTime.Format(time.RFC3339),
+		data.StateAt,
 	)
 
-	h.state.SetStartTime(startTime)
-	h.SendStart()
-}
-
-func (h *Handlers) SendStart() {
-	gameName := h.state.GetCurrentGame()
-	if gameName == "" {
-		log.Printf("SendStart: no current game set in state")
-		return
-	}
-	h.ipc.SendStart(h.state.GetStartTime().Unix(), gameName)
-}
-
-func (h *Handlers) PauseGame(payload json.RawMessage) {
-	var data struct {
-		At *int64 `json:"at,omitempty"`
-	}
-	_ = json.Unmarshal(payload, &data)
-	h.ipc.SendPause(data.At)
-	log.Printf("Game pause requested at: %v", data.At)
+	h.state.SetState(stateTime, data.State)
+	h.ipc.SendSync()
 }
 
 func (h *Handlers) SessionEnded(payload json.RawMessage) {
@@ -236,10 +217,8 @@ func (h *Handlers) handleRawEvent(raw json.RawMessage) {
 		h.ServerMessage(msg.Payload)
 	case "kick":
 		h.Kick(msg.Payload)
-	case "start_game":
-		h.StartGame(msg.Payload)
-	case "pause_game":
-		h.PauseGame(msg.Payload)
+	case "change_game_state":
+		h.ChnageGameState(msg.Payload)
 	case "session_ended":
 		h.SessionEnded(msg.Payload)
 	case "prepare_swap":

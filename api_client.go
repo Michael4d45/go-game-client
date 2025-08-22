@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -149,7 +150,8 @@ func (a *API) Ready(ctx context.Context, state *ClientState) error {
 
 	var data struct {
 		GameFile *string `json:"game_file"`
-		StartAt  *int64  `json:"start_at"`
+		State    string  `json:"state"`
+		StateAt  int64   `json:"state_at"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
 		return fmt.Errorf("decode ready response: %w", err)
@@ -161,11 +163,14 @@ func (a *API) Ready(ctx context.Context, state *ClientState) error {
 	} else {
 		state.SetCurrentGame("")
 	}
-	if data.StartAt != nil {
-		state.SetStartTime(time.Unix(*data.StartAt, 0))
-	} else {
-		state.SetStartTime(time.Time{})
-	}
+	stateTime := time.Unix(data.StateAt, 0)
+	log.Printf(
+		"Scheduled %s at %s (%d)",
+		data.State,
+		stateTime.Format(time.RFC3339),
+		data.StateAt,
+	)
+	state.SetState(stateTime, data.State)
 
 	return nil
 }

@@ -179,7 +179,7 @@ func (b *BizhawkIPC) handleResponse(line string) {
 	case "HELLO":
 		// Lua restarted, send SYNC
 		go func() {
-			if err := b.SendSync(b.state); err != nil {
+			if err := b.SendSync(); err != nil {
 				log.Printf("[IPC] Failed to send SYNC: %v", err)
 			} else {
 				log.Printf("[IPC] Sent SYNC to BizHawk")
@@ -218,14 +218,11 @@ func (b *BizhawkIPC) startResender(ctx context.Context) {
 }
 
 // SendSync sends the current state to Lua after HELLO.
-func (b *BizhawkIPC) SendSync(state *ClientState) error {
-	game := state.GetCurrentGame()
-	paused := 0
-	if !state.Snapshot().Ready {
-		paused = 1
-	}
-	startAt := state.GetStartTime().Unix()
-	return b.SendCommand("SYNC", game, fmt.Sprintf("%d", paused), fmt.Sprintf("%d", startAt))
+func (b *BizhawkIPC) SendSync() error {
+	game := b.state.GetCurrentGame()
+	stateAt := b.state.GetStateTime().Unix()
+	state := b.state.GetState()
+	return b.SendCommand("SYNC", game, state, fmt.Sprintf("%d", stateAt))
 }
 
 // Convenience helpers

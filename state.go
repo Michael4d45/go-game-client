@@ -16,7 +16,8 @@ const (
 	EventDisconnected       StateEventType = "disconnected"
 	EventCurrentGameChanged StateEventType = "current_game_changed"
 	EventReadyChanged       StateEventType = "ready_changed"
-	EventStartTimeChanged   StateEventType = "start_time_changed"
+	EventStateChanged       StateEventType = "state_changed"
+	EventStateTimeChanged   StateEventType = "state_time_changed"
 )
 
 // StateEvent is a small event sent to subscribers.
@@ -29,13 +30,14 @@ type StateEvent struct {
 
 // ClientStateSnapshot is a serializable snapshot of important fields.
 type ClientStateSnapshot struct {
-	Ping          int        `json:"ping"`
-	Connected     bool       `json:"connected"`
-	CurrentGame   string     `json:"current_game"`
-	LastHeartbeat time.Time  `json:"last_heartbeat"`
-	Ready         bool       `json:"ready"`
-	LastError     string     `json:"last_error,omitempty"`
-	StartAt       *time.Time `json:"start_at,omitempty"`
+	Ping          int       `json:"ping"`
+	Connected     bool      `json:"connected"`
+	CurrentGame   string    `json:"current_game"`
+	LastHeartbeat time.Time `json:"last_heartbeat"`
+	Ready         bool      `json:"ready"`
+	LastError     string    `json:"last_error,omitempty"`
+	StateAt       time.Time `json:"state_at"`
+	State         string    `json:"state"`
 }
 
 // ClientState holds ephemeral runtime state (concurrency safe).
@@ -48,7 +50,8 @@ type ClientState struct {
 	lastHeartbeat time.Time
 	ready         bool
 	lastError     string
-	startAt       time.Time
+	stateAt       time.Time
+	state         string
 
 	subMu sync.Mutex
 	subs  map[chan StateEvent]struct{}
@@ -151,16 +154,25 @@ func (s *ClientState) SetReady(r bool) {
 	})
 }
 
-// SetStartTime sets the start time and emits event.
-func (s *ClientState) SetStartTime(t time.Time) {
+// SetStateTime sets the state time and emits event.
+func (s *ClientState) SetState(t time.Time, state string) {
 	s.mu.Lock()
-	old := s.startAt
-	s.startAt = t
+	oldStateAt := s.stateAt
+	s.stateAt = t
+	oldState := s.state
+	s.state = state
 	s.mu.Unlock()
 
 	s.notify(StateEvent{
-		Type: EventStartTimeChanged,
-		Old:  old,
+		Type: EventStateTimeChanged,
+		Old:  oldStateAt,
+		New:  t,
+		When: time.Now(),
+	})
+
+	s.notify(StateEvent{
+		Type: EventStateChanged,
+		Old:  oldState,
 		New:  t,
 		When: time.Now(),
 	})
@@ -169,11 +181,6 @@ func (s *ClientState) SetStartTime(t time.Time) {
 // Snapshot returns a copy of important runtime info.
 func (s *ClientState) Snapshot() ClientStateSnapshot {
 	s.mu.RLock()
-	var startAt *time.Time
-	if !s.startAt.IsZero() {
-		t := s.startAt
-		startAt = &t
-	}
 	snap := ClientStateSnapshot{
 		Ping:          s.ping,
 		Connected:     s.connected,
@@ -181,7 +188,8 @@ func (s *ClientState) Snapshot() ClientStateSnapshot {
 		LastHeartbeat: s.lastHeartbeat,
 		Ready:         s.ready,
 		LastError:     s.lastError,
-		StartAt:       startAt,
+		StateAt:       s.stateAt,
+		State:         s.state,
 	}
 	s.mu.RUnlock()
 	return snap
@@ -218,11 +226,8 @@ func (s *ClientState) LoadFromFile(path string) error {
 	s.lastHeartbeat = snap.LastHeartbeat
 	s.ready = snap.Ready
 	s.lastError = snap.LastError
-	if snap.StartAt != nil {
-		s.startAt = *snap.StartAt
-	} else {
-		s.startAt = time.Time{}
-	}
+	s.stateAt = snap.StateAt
+	s.state = snap.State
 	s.mu.Unlock()
 	return nil
 }
@@ -242,9 +247,16 @@ func (s *ClientState) GetPing() int {
 	return p
 }
 
-func (s *ClientState) GetStartTime() time.Time {
+func (s *ClientState) GetStateTime() time.Time {
 	s.mu.RLock()
-	t := s.startAt
+	t := s.stateAt
 	s.mu.RUnlock()
 	return t
+}
+
+func (s *ClientState) GetState() string {
+	s.mu.RLock()
+	state := s.state
+	s.mu.RUnlock()
+	return state
 }
