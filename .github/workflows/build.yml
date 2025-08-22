@@ -28,13 +28,18 @@ jobs:
           GOOS=windows GOARCH=amd64 go build -o dist/bizhawk-client-windows-amd64.exe ./...
           GOOS=linux   GOARCH=amd64 go build -o dist/bizhawk-client-linux-amd64 ./...
           GOOS=darwin  GOARCH=amd64 go build -o dist/bizhawk-client-macos-amd64 ./...
+          cd dist
+          zip bizhawk-client-windows-amd64.zip bizhawk-client-windows-amd64.exe
+          zip bizhawk-client-linux-amd64.zip bizhawk-client-linux-amd64
+          zip bizhawk-client-macos-amd64.zip bizhawk-client-macos-amd64
+          cd ..
 
       - name: Create GitHub Release and Upload Assets
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/bizhawk-client-windows-amd64.exe
-            dist/bizhawk-client-linux-amd64
-            dist/bizhawk-client-macos-amd64
+            dist/bizhawk-client-windows-amd64.zip
+            dist/bizhawk-client-linux-amd64.zip
+            dist/bizhawk-client-macos-amd64.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
